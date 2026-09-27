@@ -100,7 +100,7 @@ let showCal=false, CAMS={};
 // That is not the model we actually solve -- which uses the line-derived lens
 // plus a full 3D pose.  This overlay draws THAT, so the tool and the solver show
 // the same thing instead of two different answers.
-fetch('out/cams.json').then(r=>r.ok?r.json():{}).then(j=>{CAMS=j; if(fboxR) draw();});
+fetch('/out/cams.json').then(r=>r.ok?r.json():{}).then(j=>{CAMS=j; if(fboxR) draw();});
 // Re-solve through the SAME Python solver the command line uses, so the overlay
 // can never drift away from the real answer.  red_station_b shares its lens with
 // red_station: the camera was bumped, not swapped.
@@ -125,7 +125,7 @@ function resolve(){
 }
 function queueSolve(){ if(!document.getElementById('autosolve').checked) return;
   clearTimeout(solveTimer); solveTimer=setTimeout(resolve, 1200); }
-fetch('out/lines_multi.json').then(r=>r.ok?r.json():null).then(j=>{ if(j) window.LINES=j; });
+fetch('/out/lines_multi.json').then(r=>r.ok?r.json():null).then(j=>{ if(j) window.LINES=j; });
 function camRedist(C,q){
   const X=(q[0]-C.cx)/C.f, Y=(q[1]-C.cy)/C.f, R=Math.hypot(X,Y);
   if(R<1e-12) return [C.cx,C.cy];
@@ -165,9 +165,9 @@ let ready=0, NEED=1+2*3;
 const bump=()=>{ if(++ready===NEED) boot(); };
 fbox.onload=bump;
 VIEWS.forEach(v=>{
-  const a=new Image(); a.onload=()=>{plates[v]=a;bump();}; a.onerror=bump; a.src='out/plate_'+v+'.png';
-  const b=new Image(); b.onload=()=>{frames[v]=b;bump();}; b.onerror=bump; b.src='out/frame_'+v+'.png';
-  const c=new Image(); c.onload=()=>{enh[v]=c;}; c.src='out/enh_'+v+'.png';
+  const a=new Image(); a.onload=()=>{plates[v]=a;bump();}; a.onerror=bump; a.src='/out/plate_'+v+'.png';
+  const b=new Image(); b.onload=()=>{frames[v]=b;bump();}; b.onerror=bump; b.src='/out/frame_'+v+'.png';
+  const c=new Image(); c.onload=()=>{enh[v]=c;}; c.src='/out/enh_'+v+'.png';
   // Where the broadcast pastes its own graphics.  Found by temporal variance:
   // an overlay is byte-identical every frame, carpet is not.
   const m=new Image(); m.onload=()=>{
@@ -175,26 +175,26 @@ VIEWS.forEach(v=>{
     const g=k.getContext('2d'); g.drawImage(m,0,0);
     masks[v]=k; maskData[v]=g.getImageData(0,0,m.width,m.height);
     if(fboxR) draw();          // masks can arrive before boot() builds fboxR
-  }; m.src='out/overlaymask_'+v+'.png';
+  }; m.src='/out/overlaymask_'+v+'.png';
 });
-fbox.src='out/field_box.png';
+fbox.src='/out/field_box.png';
 
 async function boot(){
-  try{ TAGSALL=await (await fetch('out/tags.json')).json(); }catch(e){}
-  try{ TAGVIEWS=await (await fetch('out/tags_views.json')).json(); }catch(e){console.warn(e);}
+  try{ TAGSALL=await (await fetch('/out/tags.json')).json(); }catch(e){}
+  try{ TAGVIEWS=await (await fetch('/out/tags_views.json')).json(); }catch(e){console.warn(e);}
   VIEWS.forEach(v=>{ALLPTS[v]=[]; ALLTAGS[v]={};});
   // The wide view keeps its original guide list: 12 candidates (3 auto-detected
   // plus 9 predicted positions to hand-mark), which is richer than the 3 the
   // detector alone finds.  The station views have no predicted guides yet --
   // that needs a pose, which is what we are here to solve.
-  try{ const tg=await (await fetch('out/tag_guides.json')).json();
+  try{ const tg=await (await fetch('/out/tag_guides.json')).json();
        if(Array.isArray(tg)&&tg.length) TAGVIEWS['wide']=tg; }catch(e){}
   // Seed the wide view with the calibration already done, so it is not lost.
   // points_corrected.json holds TRUE field coordinates (the old mirroring was
   // repaired there), which is exactly what the unrotated diagram expects.
-  try{ const pc=await (await fetch('out/points_corrected.json')).json();
+  try{ const pc=await (await fetch('/out/points_corrected.json')).json();
        if(Array.isArray(pc)) ALLPTS['wide']=pc.map(o=>({u:o.u,v:o.v,X:o.X,Y:o.Y})); }catch(e){}
-  try{ const tm=await (await fetch('out/tag_marks.json')).json();
+  try{ const tm=await (await fetch('/out/tag_marks.json')).json();
        if(tm&&typeof tm==='object') ALLTAGS['wide']=tm; }catch(e){}
   // Station tags are ALL detected, with sub-pixel corners already.  Pre-fill
   // them as marks so the solver gets those 24 corner points per view without
@@ -204,7 +204,7 @@ async function boot(){
     for(const g of (TAGVIEWS[v]||[]))
       if(g.corners && !ALLTAGS[v][g.id]) ALLTAGS[v][g.id]=g.corners;
   });
-  try{ const j=await (await fetch('out/points_multi.json')).json();
+  try{ const j=await (await fetch('/out/points_multi.json')).json();
        if(j&&typeof j==='object') VIEWS.forEach(v=>{
          if(j[v]&&j[v].pairs) {ALLPTS[v]=j[v].pairs; ALLTAGS[v]=j[v].tagMarks||{};}
          else if(Array.isArray(j[v])) ALLPTS[v]=j[v];});

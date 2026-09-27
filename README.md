@@ -52,7 +52,7 @@ building it.
 ```
 src/            pipeline modules and drivers (see INSTRUCTIONS.md)
 src/experiments one-off analysis scripts kept for reference; not part of the pipeline
-*.html          browser tools: label, calib, lines, pair, trace  (served by src/serve.py)
+tools/          browser tools: label, calib, lines, pair, trace  (served by src/serve.py)
 docs/           component reference
 data/ out/ runs/   per-match inputs and artefacts — git-ignored, created by you
 ```

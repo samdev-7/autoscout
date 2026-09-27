@@ -41,7 +41,7 @@ let sel=null,anchor=null,mouse=null,zoom=0;
 const LS='autoscout_labels_v1';
 const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
 
-fetch('out/frames.json').then(r=>r.json()).then(m=>{
+fetch('/out/frames.json').then(r=>r.json()).then(m=>{
   man=m; B0=m.band[0]; B1=m.band[1];
   try{ labels=JSON.parse(localStorage.getItem(LS))||{}; }catch(e){ labels={}; }
   cv.width=1920; cv.height=B1-B0;
@@ -62,7 +62,7 @@ fetch('out/frames.json').then(r=>r.json()).then(m=>{
 });
 const cur=()=>{ const f=man.frames[idx].file; if(!labels[f]) labels[f]=[]; return labels[f]; };
 const save=()=>localStorage.setItem(LS,JSON.stringify(labels));
-function load(){ img=new Image(); img.onload=draw; img.src='out/frames/'+man.frames[idx].file;
+function load(){ img=new Image(); img.onload=draw; img.src='/out/frames/'+man.frames[idx].file;
   sel=null; anchor=null; }
 function go(d){ idx=Math.max(0,Math.min(man.frames.length-1,idx+d)); load(); }
 function setZoom(z,btn){ zoom=z;

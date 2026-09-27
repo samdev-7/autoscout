@@ -71,12 +71,12 @@ function imgToGround(u,v){
   if(s<=0) return null;                       // behind the camera
   return [C[0]+s*d[0], C[1]+s*d[1]];
 }
-Promise.all([fetch('out/pair_manifest.json').then(r=>r.json()),
-             fetch('out/wide_cam.json').then(r=>r.json())]).then(([m,c])=>{
+Promise.all([fetch('/out/pair_manifest.json').then(r=>r.json()),
+             fetch('/out/wide_cam.json').then(r=>r.json())]).then(([m,c])=>{
   MAN=m; CAM=c;
   document.getElementById('scrub').max=MAN.frames.length-1;
   lo.width=RW*ZOOM; lo.height=RW*ZOOM;
-  fetch('out/points_multi.json').then(r=>r.ok?r.json():null).then(j=>{
+  fetch('/out/points_multi.json').then(r=>r.ok?r.json():null).then(j=>{
     const KEYS=['red_station','red_station_b','blue_station'];
     if(j) for(const k of KEYS) if(j[k]&&j[k].pairs) data[k]=j[k].pairs.slice();
     try{const s=localStorage.getItem('autoscout_pair');
@@ -90,7 +90,7 @@ Promise.all([fetch('out/pair_manifest.json').then(r=>r.json()),
 });
 function frame(i){return MAN.frames[i]}
 function load(name,view){ const k=view+'/'+name;
-  if(!imgs[k]){ const im=new Image(); im.onload=draw; im.src='out/pair/'+view+'/'+name; imgs[k]=im; }
+  if(!imgs[k]){ const im=new Image(); im.onload=draw; im.src='/out/pair/'+view+'/'+name; imgs[k]=im; }
   return imgs[k]; }
 function go(i){ idx=Math.max(0,Math.min(MAN.frames.length-1,i));
   document.getElementById('scrub').value=idx; pend=null; refine=null; hideLoupe();

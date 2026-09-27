@@ -52,7 +52,7 @@ with a YOLO11l fine-tune.
 .venv/bin/python src/serve.py
 ```
 
-It serves the repo on <http://127.0.0.1:8765>, saves tool output into `out/`
+It serves the repo on <http://127.0.0.1:8765> (tools live under `/tools/`), saves tool output into `out/`
 (every save first snapshots the previous file to `out/backup/`), and runs the
 calibration solver live for `calib.html`.
 
@@ -85,7 +85,7 @@ same field frame.
 
 ### 2a. Wide camera
 
-Open <http://127.0.0.1:8765/calib.html>, choose the **wide** view, and click
+Open <http://127.0.0.1:8765/tools/calib.html>, choose the **wide** view, and click
 matching points between the plate and the field diagram — carpet features only
 (tape corners, structure bases), never anything with height. Mark AprilTag
 corners where they are detected; the tool shows candidate positions. Save.
@@ -114,13 +114,13 @@ measurement sigma across the field.
 Three sources of constraint, all through browser tools. The solve needs at
 least 6 constraints per view and gets better with more:
 
-- **Straight lines** — <http://127.0.0.1:8765/lines.html>. Trace lines that are
+- **Straight lines** — <http://127.0.0.1:8765/tools/lines.html>. Trace lines that are
   straight in the world (field border, wall edges, banners) and label their
   direction. This fits the lens distortion (`k1`, `k2`) and principal point,
   and the vanishing points fix the focal length. The purple overlay is the fit's
   own prediction of those lines; it should match the curvature you see.
 - **Carpet points and tags** — `calib.html`, same as the wide view, per station.
-- **Cross-view pairs** — <http://127.0.0.1:8765/pair.html>. Needs
+- **Cross-view pairs** — <http://127.0.0.1:8765/tools/pair.html>. Needs
   `.venv/bin/python src/pair_frames.py` first (1 Hz frame pairs). Scrub to a
   moment when a robot's floor contact is visible in both the wide view and a
   station view and click it in both; the wide click is mapped through the solved
@@ -215,7 +215,7 @@ robot through time.
 STEP=6 T0=8 T1=172 .venv/bin/python src/trace_frames.py   # 5 Hz frames -> out/trace_frames/
 ```
 
-Open <http://127.0.0.1:8765/trace.html>. Trace **one robot at a time**: click its
+Open <http://127.0.0.1:8765/tools/trace.html>. Trace **one robot at a time**: click its
 floor-contact point (horizontal centre of the robot, nearest bumper edge on the
 carpet), press `O` when it is occluded rather than guessing, `C` re-centres the
 follow view. Saves to `out/trace.json`.
@@ -229,7 +229,7 @@ lateral, ID switches and purity. Every tracker parameter was tuned on one match;
 treat a second traced match as the real test.
 
 For detector-level validation (boxes rather than trajectories) use
-<http://127.0.0.1:8765/label.html> on the `extract_frames.py` output, then
+<http://127.0.0.1:8765/tools/label.html> on the `extract_frames.py` output, then
 `src/prep_val*.py` and `src/evaluate.py`.
 
 ---

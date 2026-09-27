@@ -53,10 +53,10 @@ const lo=document.getElementById('lo'), lox=lo.getContext('2d');
 VIEWS.forEach(v=>{const b=document.createElement('button'); b.textContent=v; b.id='v_'+v;
   b.onclick=()=>{VIEW=v; cur=[]; setV(); }; document.getElementById('views').appendChild(b);
   data[v]=[]; const im=new Image(); im.onload=()=>{imgs[v]=im; if(v===VIEW) setV();};
-  im.src='out/plate_'+v+'.png';});
+  im.src='/out/plate_'+v+'.png';});
 DIRS.forEach(([id,d])=>document.getElementById(id).onclick=()=>{dir=d;
   DIRS.forEach(([i2,d2])=>document.getElementById(i2).classList.toggle('on',d2===d)); draw();});
-fetch('out/lines_multi.json').then(r=>r.ok?r.json():null).then(j=>{
+fetch('/out/lines_multi.json').then(r=>r.ok?r.json():null).then(j=>{
   if(j) for(const v of VIEWS) if(j[v]) data[v]=j[v];
   try{const s=localStorage.getItem('autoscout_lines'); if(s) data=JSON.parse(s);}catch(e){}
   lo.width=RW*ZOOM; lo.height=RW*ZOOM; setV();});

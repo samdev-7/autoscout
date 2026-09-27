@@ -60,10 +60,10 @@ const img=new Image(); let ready=false, mouse=null, cache={};
 ROBOTS.forEach((r,i)=>{const d=document.createElement('div');d.className='rb';d.textContent=r[1];
   d.style.borderColor=r[2];d.onclick=()=>{cur=i;render()};d.id='rb'+i;document.getElementById('robots').appendChild(d)});
 
-fetch('out/trace_manifest.json').then(r=>r.json()).then(m=>{MAN=m;
+fetch('/out/trace_manifest.json').then(r=>r.json()).then(m=>{MAN=m;
   ROBOTS.forEach(r=>data[r[0]]=data[r[0]]||{});
   try{const s=localStorage.getItem('autoscout_trace');if(s)data=JSON.parse(s);}catch(e){}
-  fetch('out/trace.json').then(r=>r.ok?r.json():null).then(j=>{if(j&&!localStorage.getItem('autoscout_trace'))data=j;load()}).catch(load);
+  fetch('/out/trace.json').then(r=>r.ok?r.json():null).then(j=>{if(j&&!localStorage.getItem('autoscout_trace'))data=j;load()}).catch(load);
 });
 function load(){sizeAll();go(0)}
 function sizeAll(){const w=document.getElementById('zoomwrap').clientWidth;
@@ -86,9 +86,9 @@ function anchorOf(r){if(!r||r==='occ')return null;
   if(r.m==='box')return [(r.b[0]+r.b[2])/2, r.b[3]];
   return r.p}
 function preload(i){for(let k=i;k<Math.min(i+8,MAN.frames.length);k++){const f=MAN.frames[k];
-  if(!cache[f.file]){const im=new Image();im.src='out/trace_frames/'+f.file;cache[f.file]=im}}}
+  if(!cache[f.file]){const im=new Image();im.src='/out/trace_frames/'+f.file;cache[f.file]=im}}}
 function go(i){idx=Math.max(0,Math.min(MAN.frames.length-1,i));ready=false;
-  const f=frame(idx);img.onload=()=>{ready=true;render()};img.src='out/trace_frames/'+f.file;preload(idx+1)}
+  const f=frame(idx);img.onload=()=>{ready=true;render()};img.src='/out/trace_frames/'+f.file;preload(idx+1)}
 
 function anchor(){ // manual pan wins; otherwise follow this robot's marks
   if(panXY)return panXY;
@@ -244,5 +244,5 @@ document.getElementById('save').onclick=()=>{
   fetch('/trace',{method:'POST',body:JSON.stringify(data)}).then(r=>r.text())
    .then(t=>{document.getElementById('msg').textContent=t;setTimeout(()=>document.getElementById('msg').textContent='',2500)})
    .catch(e=>document.getElementById('msg').textContent='save failed: '+e)};
-fetch('out/dets_trace.json').then(r=>r.ok?r.json():null).then(j=>{if(j)dets=j}).catch(()=>{});
+fetch('/out/dets_trace.json').then(r=>r.ok?r.json():null).then(j=>{if(j)dets=j}).catch(()=>{});
 </script>
