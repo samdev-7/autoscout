@@ -4,13 +4,15 @@
 > design decisions, calibration and labelling are the author's; much of the code
 > and analysis was written in collaboration with Claude Code.
 
+> This is a proof-of-concept experiment and is not intended or ready for production use.
+
 Robot tracking for FRC matches from the broadcast video alone: no field
 instrumentation, no team-side hardware. One match VOD in, six continuous robot
 trajectories in field metres out, with a per-frame uncertainty ellipse for each.
 
 [![demo](docs/demo.gif)](https://cdn.hackclub.com/01a0e35b-a60e-7d01-949b-d0e503af08ca/fused_full_demo.mp4)
 
-*Full match with audio: [fused_full_demo.mp4](https://cdn.hackclub.com/01a0e35b-a60e-7d01-949b-d0e503af08ca/fused_full_demo.mp4).*
+_Full match with audio: [fused_full_demo.mp4](https://cdn.hackclub.com/01a0e35b-a60e-7d01-949b-d0e503af08ca/fused_full_demo.mp4)._
 Broadcast panel with boxes coloured by track; top-down field with 2σ uncertainty
 ellipses, fading trails, and a line from each robot to every camera that saw it
 (green = carries most of the fused information, orange = least); station views below.
@@ -38,7 +40,7 @@ Field images and AprilTag layouts come from
    with a hard physical speed gate. Tracklets are short but pure.
 5. **Identity** — an exact minimum-cost cover by three time-ordered paths per
    alliance decides which tracklets belong to the same robot. Station-camera
-   tracklets are used as *link evidence* across occlusions, never merged.
+   tracklets are used as _link evidence_ across occlusions, never merged.
 6. **Smoothing and output** — an RTS smoother per robot over every camera's
    measurements, then a side-by-side render of broadcast, top-down field with
    ellipses and trails, and the station views.
