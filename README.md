@@ -62,3 +62,7 @@ data/ out/ runs/   per-match inputs and artefacts — git-ignored, created by yo
 Python 3.11+, the packages in `requirements.txt`, and `ffmpeg` on the path for
 muxing audio into renders. Inference and tracking run on a standard Mac; training
 was done on a cloud GPU (`src/train_kaggle.py`).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
