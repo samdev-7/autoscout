@@ -1,5 +1,9 @@
 # autoscout
 
+> Built with the assistance of [Claude](https://claude.ai) (Anthropic). The
+> design decisions, calibration and labelling are the author's; much of the code
+> and analysis was written in collaboration with Claude Code.
+
 Robot tracking for FRC matches from the broadcast video alone: no field
 instrumentation, no team-side hardware. One match VOD in, six continuous robot
 trajectories in field metres out, with a per-frame uncertainty ellipse for each.
