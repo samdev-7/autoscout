@@ -1,0 +1,248 @@
+<meta charset="utf-8">
+<title>autoscout — robot tracing</title>
+<style>
+:root{--bg:#14161a;--fg:#e8eaed;--dim:#9aa0a6;--line:#2a2e35;--acc:#7cc4ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:8px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.robots{display:flex;gap:5px}
+.rb{padding:4px 11px;border:1px solid var(--line);border-radius:5px;cursor:pointer;background:#1b1e24;font-weight:600}
+.rb.on{outline:2px solid var(--acc)}
+#wide{position:relative;line-height:0;border-bottom:1px solid var(--line)}
+#wide img{width:100%;display:block}
+#wideov{position:absolute;inset:0;width:100%;height:100%}
+#zoomwrap{position:relative;line-height:0;background:#000}
+#zoom{display:block;width:100%;cursor:none}
+#hud{position:absolute;left:0;right:0;bottom:0;display:flex;gap:16px;padding:6px 10px;background:rgba(0,0,0,.62);font-variant-numeric:tabular-nums}
+.k{color:var(--dim)}
+#bar{height:16px;width:100%;display:block;background:#0e1013}
+footer{padding:6px 12px;color:var(--dim);border-top:1px solid var(--line)}
+b.key{color:var(--fg);background:#242830;border-radius:3px;padding:1px 5px;font-weight:600}
+#msg{color:var(--acc)}
+</style>
+<header>
+  <div class="robots" id="robots"></div>
+  <span class="k">click</span>
+  <select id="cmode"><option value="floor">floor contact</option><option value="top">top of robot</option></select>
+  <span class="k">zoom</span><input id="zs" type="range" min="2" max="8" step="0.5" value="4">
+  <label><input type="checkbox" id="showdet"> detections</label>
+  <label><input type="checkbox" id="autoadv" checked> auto-advance</label>
+  <label><input type="checkbox" id="follow" checked> follow</label>
+  <button id="save">save</button><span id="msg"></span>
+</header>
+<div id="wide"><img id="wimg"><canvas id="wideov"></canvas></div>
+<canvas id="bar"></canvas>
+<div id="zoomwrap"><canvas id="zoom"></canvas>
+  <div id="hud">
+    <span><span class="k">frame</span> <span id="hf">-</span></span>
+    <span><span class="k">t</span> <span id="ht">-</span>s</span>
+    <span><span class="k">robot</span> <span id="hr">-</span></span>
+    <span><span class="k">state</span> <span id="hs">-</span></span>
+    <span><span class="k">done</span> <span id="hd">-</span></span>
+  </div>
+</div>
+<footer>
+  <b class="key">click</b> mark point (mode above) &nbsp; <b class="key">drag</b> box &nbsp; <b class="key">F/T</b> click-mode &nbsp;
+  <b class="key">O</b> occluded &nbsp; <b class="key">U</b> clear &nbsp;
+  <b class="key">←/→</b> step &nbsp; <b class="key">shift+←/→</b> ×10 &nbsp;
+  <b class="key">Z</b> undo &nbsp; <b class="key">1-6</b> robot &nbsp;
+  <b class="key">N</b> next unlabelled &nbsp; <b class="key">C</b> re-centre &nbsp; <b class="key">shift+drag</b> pan &nbsp; <b class="key">space</b> hold to hide overlay
+</footer>
+<script>
+const ROBOTS=[["r1","red 1","#f03c3c"],["r2","red 2","#ff9640"],["r3","red 3","#c83ca0"],
+              ["b1","blue 1","#2f7cf0"],["b2","blue 2","#3cc8e6"],["b3","blue 3","#8a5cf0"]];
+let MAN=null, cur=0, idx=0, data={}, hist=[], peek=false, dets={}, panXY=null;
+const wimg=document.getElementById('wimg'), wov=document.getElementById('wideov');
+const zc=document.getElementById('zoom'), zx=zc.getContext('2d');
+const bar=document.getElementById('bar'), bx=bar.getContext('2d');
+const img=new Image(); let ready=false, mouse=null, cache={};
+
+ROBOTS.forEach((r,i)=>{const d=document.createElement('div');d.className='rb';d.textContent=r[1];
+  d.style.borderColor=r[2];d.onclick=()=>{cur=i;render()};d.id='rb'+i;document.getElementById('robots').appendChild(d)});
+
+fetch('out/trace_manifest.json').then(r=>r.json()).then(m=>{MAN=m;
+  ROBOTS.forEach(r=>data[r[0]]=data[r[0]]||{});
+  try{const s=localStorage.getItem('autoscout_trace');if(s)data=JSON.parse(s);}catch(e){}
+  fetch('out/trace.json').then(r=>r.ok?r.json():null).then(j=>{if(j&&!localStorage.getItem('autoscout_trace'))data=j;load()}).catch(load);
+});
+function load(){sizeAll();go(0)}
+function sizeAll(){const w=document.getElementById('zoomwrap').clientWidth;
+  // fill whatever vertical space the other chrome leaves, so the HUD stays visible
+  const used=document.querySelector('header').offsetHeight
+            +document.getElementById('wide').offsetHeight
+            +bar.offsetHeight+document.querySelector('footer').offsetHeight;
+  zc.width=w;zc.height=Math.max(220,innerHeight-used-6);
+  wov.width=1920;wov.height=MAN.h;bar.width=bar.clientWidth;bar.height=16;}
+addEventListener('resize',()=>{sizeAll();render()});
+
+function frame(i){return MAN.frames[i]}
+function key(){return ROBOTS[cur][0]}
+function rec(i){const f=frame(i);return norm(data[key()][f.f])}
+function norm(r){                                   // old traces stored a bare [x,y]
+  if(r===undefined||r==='occ')return r;
+  if(Array.isArray(r))return {m:'floor',p:r};
+  return r}
+function anchorOf(r){if(!r||r==='occ')return null;
+  if(r.m==='box')return [(r.b[0]+r.b[2])/2, r.b[3]];
+  return r.p}
+function preload(i){for(let k=i;k<Math.min(i+8,MAN.frames.length);k++){const f=MAN.frames[k];
+  if(!cache[f.file]){const im=new Image();im.src='out/trace_frames/'+f.file;cache[f.file]=im}}}
+function go(i){idx=Math.max(0,Math.min(MAN.frames.length-1,i));ready=false;
+  const f=frame(idx);img.onload=()=>{ready=true;render()};img.src='out/trace_frames/'+f.file;preload(idx+1)}
+
+function anchor(){ // manual pan wins; otherwise follow this robot's marks
+  if(panXY)return panXY;
+  for(let k=idx;k>=Math.max(0,idx-40);k--){const a=anchorOf(norm(data[key()][frame(k).f]));
+    if(a)return a}
+  for(let k=idx;k<Math.min(MAN.frames.length,idx+40);k++){const a=anchorOf(norm(data[key()][frame(k).f]));
+    if(a)return a}
+  return [960,MAN.h/2];
+}
+function zparams(){const z=parseFloat(document.getElementById('zs').value);
+  const a=anchor();const vw=zc.width/z, vh=zc.height/z;
+  let ox=a[0]-vw/2, oy=a[1]-vh/2;
+  ox=Math.max(0,Math.min(1920-vw,ox)); oy=Math.max(0,Math.min(MAN.h-vh,oy));
+  return {z,ox,oy,vw,vh};}
+function toImg(ev){const p=zparams(),r=zc.getBoundingClientRect();
+  return [p.ox+(ev.clientX-r.left)*(zc.width/r.width)/p.z, p.oy+(ev.clientY-r.top)*(zc.height/r.height)/p.z]}
+
+function render(){
+  if(!MAN)return;
+  try{ draw() }catch(e){ console.error("render",e) }
+}
+function draw(){
+  const f=frame(idx);
+  ROBOTS.forEach((r,i)=>document.getElementById('rb'+i).classList.toggle('on',i===cur));
+  document.getElementById('hf').textContent=f.f;
+  document.getElementById('ht').textContent=f.t.toFixed(2);
+  document.getElementById('hr').textContent=ROBOTS[cur][1];
+  const r0=rec(idx);
+  document.getElementById('hs').textContent=
+    r0==='occ'?'OCCLUDED':(r0?({floor:'floor',top:'TOP',box:'box'}[r0.m]):'—');
+  const tot=MAN.frames.length;let n=0;for(const fr of MAN.frames)if(data[key()][fr.f]!==undefined)n++;
+  document.getElementById('hd').textContent=`${n}/${tot} (${(100*n/tot).toFixed(0)}%)`;
+  wimg.src=img.src;
+  const p=zparams();
+  zx.fillStyle='#000';zx.fillRect(0,0,zc.width,zc.height);
+  if(ready){zx.imageSmoothingEnabled=false;
+    zx.drawImage(img,p.ox,p.oy,p.vw,p.vh,0,0,zc.width,zc.height);}
+  if(!peek){
+    // trail of recent traced points
+    zx.lineWidth=2;zx.strokeStyle=ROBOTS[cur][2];zx.globalAlpha=.55;zx.beginPath();let started=false;
+    for(let k=Math.max(0,idx-25);k<=idx;k++){const rr=anchorOf(norm(data[key()][frame(k).f]));
+      if(!rr){started=false;continue}
+      const X=(rr[0]-p.ox)*p.z, Y=(rr[1]-p.oy)*p.z;
+      if(!started){zx.moveTo(X,Y);started=true}else zx.lineTo(X,Y)}
+    zx.stroke();zx.globalAlpha=1;
+    if(document.getElementById('showdet').checked&&dets[f.f])for(const b of dets[f.f]){
+      zx.strokeStyle='rgba(255,255,255,.5)';zx.lineWidth=1;
+      zx.strokeRect((b[0]-p.ox)*p.z,(b[1]-p.oy)*p.z,(b[2]-b[0])*p.z,(b[3]-b[1])*p.z)}
+    for(let k=Math.max(0,idx-12);k<=Math.min(MAN.frames.length-1,idx+4);k++){
+      if(k===idx)continue;
+      const a=anchorOf(norm(data[key()][frame(k).f]));
+      if(!a)continue;
+      const age=Math.abs(k-idx);
+      zx.globalAlpha=Math.max(0.12,0.62-0.05*age);
+      zx.fillStyle=ROBOTS[cur][2];
+      zx.beginPath();zx.arc((a[0]-p.ox)*p.z,(a[1]-p.oy)*p.z,k<idx?4:3,0,7);zx.fill();
+      zx.globalAlpha=1}
+    if(r0&&r0!=='occ'&&r0.m==='box'){
+      zx.strokeStyle=ROBOTS[cur][2];zx.lineWidth=2;
+      zx.strokeRect((r0.b[0]-p.ox)*p.z,(r0.b[1]-p.oy)*p.z,
+                    (r0.b[2]-r0.b[0])*p.z,(r0.b[3]-r0.b[1])*p.z);
+      const cx=((r0.b[0]+r0.b[2])/2-p.ox)*p.z, by=(r0.b[3]-p.oy)*p.z;
+      zx.fillStyle=ROBOTS[cur][2];zx.beginPath();zx.arc(cx,by,5,0,7);zx.fill()}
+    if(drag&&mouse){zx.strokeStyle='#fff';zx.setLineDash([5,4]);zx.lineWidth=1.5;
+      zx.strokeRect(Math.min(drag[0],mouse[0]),Math.min(drag[1],mouse[1]),
+                    Math.abs(mouse[0]-drag[0]),Math.abs(mouse[1]-drag[1]));zx.setLineDash([])}
+    if(r0&&r0!=='occ'&&r0.m!=='box'){const X=(r0.p[0]-p.ox)*p.z,Y=(r0.p[1]-p.oy)*p.z;
+      if(r0.m==='top'){zx.strokeStyle=ROBOTS[cur][2];zx.lineWidth=1.5;
+        zx.beginPath();zx.moveTo(X-14,Y);zx.lineTo(X+14,Y);zx.stroke()}
+      zx.strokeStyle=ROBOTS[cur][2];zx.lineWidth=2;
+      zx.beginPath();zx.arc(X,Y,9,0,7);zx.stroke();
+      zx.beginPath();zx.moveTo(X-16,Y);zx.lineTo(X-4,Y);zx.moveTo(X+4,Y);zx.lineTo(X+16,Y);
+      zx.moveTo(X,Y-16);zx.lineTo(X,Y-4);zx.moveTo(X,Y+4);zx.lineTo(X,Y+16);zx.stroke();}
+    if(r0==='occ'){zx.fillStyle='rgba(255,80,80,.16)';zx.fillRect(0,0,zc.width,zc.height);
+      zx.fillStyle='#ff8080';zx.font='600 20px system-ui';zx.fillText('OCCLUDED',14,30)}
+    if(mouse){zx.strokeStyle='rgba(255,255,255,.85)';zx.lineWidth=1;zx.beginPath();
+      zx.moveTo(mouse[0],0);zx.lineTo(mouse[0],zc.height);
+      zx.moveTo(0,mouse[1]);zx.lineTo(zc.width,mouse[1]);zx.stroke()}
+  }
+  // wide view: zoom rect + this robot's marker
+  const wx=wov.getContext('2d');wx.clearRect(0,0,1920,MAN.h);
+  wx.strokeStyle='rgba(124,196,255,.9)';wx.lineWidth=2;wx.strokeRect(p.ox,p.oy,p.vw,p.vh);
+  {const a=anchorOf(r0);if(a){wx.fillStyle=ROBOTS[cur][2];wx.beginPath();wx.arc(a[0],a[1],6,0,7);wx.fill()}}
+  drawBar();
+}
+function drawBar(){bx.clearRect(0,0,bar.width,16);const n=MAN.frames.length;
+  for(let k=0;k<n;k++){const r=data[key()][frame(k).f];
+    bx.fillStyle=r===undefined?'#1a1d22':(r==='occ'?'#7a3030':(norm(r).m==='top'?'#c8a23c':ROBOTS[cur][2]));
+    bx.fillRect(Math.floor(k*bar.width/n),0,Math.ceil(bar.width/n)+1,16)}
+  bx.fillStyle='#fff';bx.fillRect(Math.floor(idx*bar.width/n),0,2,16)}
+bar.onclick=e=>{const r=bar.getBoundingClientRect();
+  go(Math.floor((e.clientX-r.left)/r.width*MAN.frames.length))};
+
+zc.addEventListener('mousemove',e=>{const r=zc.getBoundingClientRect();
+  mouse=[(e.clientX-r.left)*(zc.width/r.width),(e.clientY-r.top)*(zc.height/r.height)];render()});
+zc.addEventListener('mouseleave',()=>{mouse=null;render()});
+let drag=null, panning=null;
+wov.addEventListener('mousedown',e=>{const r=wov.getBoundingClientRect();
+  panXY=[(e.clientX-r.left)/r.width*1920,(e.clientY-r.top)/r.height*MAN.h];
+  document.getElementById('follow').checked=false;render()});
+wov.addEventListener('mousemove',e=>{if(e.buttons!==1)return;
+  const r=wov.getBoundingClientRect();
+  panXY=[(e.clientX-r.left)/r.width*1920,(e.clientY-r.top)/r.height*MAN.h];render()});
+zc.addEventListener('mousedown',e=>{const r=zc.getBoundingClientRect();
+  const c=[(e.clientX-r.left)*(zc.width/r.width),(e.clientY-r.top)*(zc.height/r.height)];
+  if(e.shiftKey){const p=zparams();panning=[c,[p.ox+p.vw/2,p.oy+p.vh/2]];
+    document.getElementById('follow').checked=false;return}
+  drag=c; mouse=c.slice()});
+zc.addEventListener('mousemove',e=>{if(!panning)return;
+  const r=zc.getBoundingClientRect(), p=zparams();
+  const c=[(e.clientX-r.left)*(zc.width/r.width),(e.clientY-r.top)*(zc.height/r.height)];
+  panXY=[panning[1][0]-(c[0]-panning[0][0])/p.z, panning[1][1]-(c[1]-panning[0][1])/p.z];
+  render()});
+addEventListener('mouseup',()=>{panning=null});
+zc.addEventListener('mouseup',e=>{
+  if(panning){panning=null;return}
+  if(!drag){return}
+  const r=zc.getBoundingClientRect();
+  const up=[(e.clientX-r.left)*(zc.width/r.width),(e.clientY-r.top)*(zc.height/r.height)];
+  const moved=Math.hypot(up[0]-drag[0],up[1]-drag[1]);
+  const p=zparams(), toI=(c)=>[p.ox+c[0]/p.z, p.oy+c[1]/p.z];
+  const d0=drag; drag=null;
+  if(moved>5){const a=toI(d0), b=toI(up);
+    set({m:'box',b:[Math.min(a[0],b[0]),Math.min(a[1],b[1]),
+                    Math.max(a[0],b[0]),Math.max(a[1],b[1])]})}
+  else{set({m:document.getElementById('cmode').value, p:toI(up)})}});
+zc.addEventListener('mouseleave',()=>{drag=null});
+function set(v){const f=frame(idx);hist.push([key(),f.f,data[key()][f.f]]);
+  if(v===undefined)delete data[key()][f.f]; else data[key()][f.f]=v;
+  persist();
+  if(document.getElementById('follow').checked)panXY=null;
+  if(document.getElementById('autoadv').checked&&idx<MAN.frames.length-1)go(idx+1);else render()}
+function persist(){try{localStorage.setItem('autoscout_trace',JSON.stringify(data))}catch(e){}}
+addEventListener('keydown',e=>{
+  if(e.key===' '){peek=true;render();e.preventDefault();return}
+  if(e.key==='o'||e.key==='O'){set('occ');e.preventDefault();return}
+  if(e.key==='u'||e.key==='U'){set(undefined);e.preventDefault();return}
+  if(e.key==='z'||e.key==='Z'){const h=hist.pop();if(h){if(h[2]===undefined)delete data[h[0]][h[1]];
+    else data[h[0]][h[1]]=h[2];persist();render()}e.preventDefault();return}
+  if(e.key==='ArrowRight'){go(idx+(e.shiftKey?10:1));e.preventDefault();return}
+  if(e.key==='ArrowLeft'){go(idx-(e.shiftKey?10:1));e.preventDefault();return}
+  if(e.key==='n'||e.key==='N'){for(let k=idx+1;k<MAN.frames.length;k++)
+    if(data[key()][frame(k).f]===undefined){go(k);return}return}
+  if(e.key==='c'||e.key==='C'){panXY=null;document.getElementById('follow').checked=true;render();return}
+  if(e.key==='f'||e.key==='F'){document.getElementById('cmode').value='floor';render();return}
+  if(e.key==='t'||e.key==='T'){document.getElementById('cmode').value='top';render();return}
+  if(/^[1-6]$/.test(e.key)){cur=+e.key-1;render()}
+});
+addEventListener('keyup',e=>{if(e.key===' '){peek=false;render()}});
+document.getElementById('zs').oninput=render;
+document.getElementById('showdet').onchange=render;
+document.getElementById('save').onclick=()=>{
+  fetch('/trace',{method:'POST',body:JSON.stringify(data)}).then(r=>r.text())
+   .then(t=>{document.getElementById('msg').textContent=t;setTimeout(()=>document.getElementById('msg').textContent='',2500)})
+   .catch(e=>document.getElementById('msg').textContent='save failed: '+e)};
+fetch('out/dets_trace.json').then(r=>r.ok?r.json():null).then(j=>{if(j)dets=j}).catch(()=>{});
+</script>

@@ -1,0 +1,689 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>autoscout — three-view calibration</title>
+<style>
+  *{box-sizing:border-box}
+  body{background:#14161a;color:#e6e8eb;font:13px/1.45 -apple-system,system-ui,sans-serif;
+       margin:0;padding:12px 14px;max-width:1440px}
+  h2{font-size:14px;margin:16px 0 6px;font-weight:600;color:#9fb4d0}
+  .hint{color:#7d8899;font-weight:400;font-size:12px}
+  .box{border:1px solid #2b313a;border-radius:6px;background:#0d0f12;overflow:hidden}
+  canvas{display:block;width:100%;height:auto;cursor:crosshair}
+  #bar,#tagbtns{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:10px 0}
+  button{background:#232a35;color:#e6e8eb;border:1px solid #39424f;border-radius:5px;
+         padding:5px 10px;font-size:12px;cursor:pointer}
+  button:hover{background:#2e3846}
+  button.p{background:#1d3a5c;border-color:#2f5f96}
+  button.go{background:#1c4a32;border-color:#2f7d51}
+  button.tg{min-width:52px;font-family:ui-monospace,monospace}
+  button.tg.done{background:#1c4a32;border-color:#48c98a;color:#9df0c4}
+  button.tg.det{background:#4a3f10;border-color:#ffd400;color:#ffd400}
+  #stat,#tedinfo{font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap;
+        background:#0d0f12;border:1px solid #2b313a;border-radius:6px;padding:9px 11px;
+        margin-top:10px;color:#b9c6d6}
+  table{border-collapse:collapse;font-family:ui-monospace,Menlo,monospace;font-size:11px;margin-top:8px}
+  td,th{border:1px solid #2b313a;padding:2px 7px;text-align:right}
+  th{background:#1b212a;color:#9fb4d0}
+  #refwrap,#tedwrap{display:none;margin-top:8px;border:2px solid #ff9f1a;border-radius:6px;
+           background:#0d0f12;overflow:hidden}
+  #tedwrap{border-color:#48c98a}
+  #refhdr,#tedhdr{background:#2a2016;color:#ffb454;padding:5px 9px;font-size:12px;
+          display:flex;justify-content:space-between;align-items:center}
+  #tedhdr{background:#12301f;color:#9df0c4}
+  #ted{cursor:grab}
+  .step{display:inline-block;background:#1d3a5c;color:#cfe3fb;border-radius:3px;
+        padding:1px 7px;margin-right:6px;font-size:11px}
+</style>
+
+<div id="viewbar" style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:0 0 10px">
+  <span class="hint">camera</span><span id="vbtns" style="display:flex;gap:6px"></span>
+  <span style="width:14px"></span>
+  <button id="srctog">median plate</button>
+  <button id="masktog">hide overlay shading</button>
+  <button id="hidetog">hide ALL overlays (H)</button>
+  <button id="caltog">show SOLVED calibration (C)</button>
+  <button id="resolve">re-solve now</button>
+  <label><input type="checkbox" id="autosolve" checked> auto</label>
+  <span id="solvemsg" class="hint"></span>
+  <button id="saveall" class="go">save all views</button>
+  <span id="savemsg" class="hint"></span>
+</div>
+<div id="stat">loading…</div>
+
+<h2><span class="step">step 1</span>broadcast plate
+  <span class="hint">click near a carpet-level landmark &mdash; yellow crosshair = auto-detected tag,
+  orange dot = an unmarked tag's spot on the FLOOR &mdash; hover its button in step 3 to light it up
+  (the tag hangs above, up the dashed arrow)</span></h2>
+<div class="box"><canvas id="cv"></canvas></div>
+
+<h2><span class="step">step 2</span>field diagram
+  <span class="hint">unrotated — verified against the camera model (red structures at field X ~12)</span></h2>
+<div id="bar">
+  <button class="p" data-fx="0"      data-fy="0">corner X0 Y0</button>
+  <button class="p" data-fx="16.541" data-fy="0">corner Xmax Y0</button>
+  <button class="p" data-fx="16.541" data-fy="8.069">corner Xmax Ymax</button>
+  <button class="p" data-fx="0"      data-fy="8.069">corner X0 Ymax</button>
+  <button class="p" data-fx="8.2705" data-fy="4.0345">field centre</button>
+  <button id="undo">undo</button><button id="clear">clear this view</button><button id="copy">copy JSON</button>
+</div>
+<div class="box"><canvas id="cf"></canvas></div>
+
+<div id="refwrap">
+  <div id="refhdr"><span id="reflab">refine</span>
+    <span><button id="refok" class="go">use centre</button><button id="refx">cancel</button></span></div>
+  <canvas id="cr"></canvas>
+</div>
+
+<h2><span class="step">step 3</span>tag corners
+  <span class="hint" id="t3hint">pick a tag, drag the 4 handles onto its corners — adds the Y/Z spread carpet points lack</span></h2>
+<div id="tagbtns"></div>
+<div id="tedwrap">
+  <div id="tedhdr"><span id="tedlab">tag</span>
+    <span><button id="tedsave" class="go">save</button><button id="tedrm">clear</button>
+          <button id="tedx">close</button></span></div>
+  <canvas id="ted"></canvas>
+</div>
+<div id="tedinfo">no tag open</div>
+
+<div id="tbl"></div>
+
+<script>
+const LEN=16.541, WID=8.069, FBW=1848, FBH=898;
+// Which tags the CURRENT view actually detects.  This has to follow the view
+// switch: it drives the yellow highlighting on the field diagram, and leaving
+// it pinned to the wide view's tags made the diagram disagree with the plate.
+let DETECTED=[2,11,21];
+let hintId=null;   // tag whose position hint is drawn prominently
+let hideAll=false; // H (or the button) blanks every overlay so the raw image is clickable
+let showCal=false, CAMS={};
+// The cyan grid below comes from a HOMOGRAPHY fitted to the marked points only.
+// That is not the model we actually solve -- which uses the line-derived lens
+// plus a full 3D pose.  This overlay draws THAT, so the tool and the solver show
+// the same thing instead of two different answers.
+fetch('out/cams.json').then(r=>r.ok?r.json():{}).then(j=>{CAMS=j; if(fboxR) draw();});
+// Re-solve through the SAME Python solver the command line uses, so the overlay
+// can never drift away from the real answer.  red_station_b shares its lens with
+// red_station: the camera was bumped, not swapped.
+let solveTimer=null, solving=false;
+const LENS_FROM={red_station_b:'red_station'};
+function resolve(){
+  if(solving) return; solving=true;
+  document.getElementById('solvemsg').textContent='solving '+VIEW+'…';
+  const body={view:VIEW, points:pairs, lines:(window.LINES&&window.LINES[VIEW])||undefined};
+  if(LENS_FROM[VIEW]) body.lens_from=LENS_FROM[VIEW];
+  fetch('/solve',{method:'POST',body:JSON.stringify(body)}).then(r=>r.json()).then(j=>{
+    solving=false;
+    if(j.error){ document.getElementById('solvemsg').textContent='solve: '+j.error; return; }
+    CAMS[VIEW]=j;
+    document.getElementById('solvemsg').textContent=
+      `solved: median ${j.median.toFixed(2)} px`
+      + (j.carpet!=null?`  carpet ${j.carpet.toFixed(2)}`:'')
+      + `  f ${j.f.toFixed(0)}  cam (${j.C[0].toFixed(2)}, ${j.C[1].toFixed(2)}, ${j.C[2].toFixed(2)})`
+      + `  [${j.n_constraints} constraints]`;
+    draw();
+  }).catch(e=>{ solving=false; document.getElementById('solvemsg').textContent='solve failed'; });
+}
+function queueSolve(){ if(!document.getElementById('autosolve').checked) return;
+  clearTimeout(solveTimer); solveTimer=setTimeout(resolve, 1200); }
+fetch('out/lines_multi.json').then(r=>r.ok?r.json():null).then(j=>{ if(j) window.LINES=j; });
+function camRedist(C,q){
+  const X=(q[0]-C.cx)/C.f, Y=(q[1]-C.cy)/C.f, R=Math.hypot(X,Y);
+  if(R<1e-12) return [C.cx,C.cy];
+  const g=r=>r*(1+C.k1*r*r+C.k2*r*r*r*r);
+  let lo=0, hi=Math.max(R,1e-3);
+  for(let i=0;i<80 && g(hi)<R;i++) hi*=1.5;
+  if(g(hi)<R) return [NaN,NaN];
+  for(let i=0;i<60;i++){ const m=0.5*(lo+hi); if(g(m)<R) lo=m; else hi=m; }
+  const r=0.5*(lo+hi), sc=r/R;
+  return [C.cx+X*sc*C.f, C.cy+Y*sc*C.f];
+}
+function camProject(C,P){
+  const c=[C.R[0][0]*P[0]+C.R[0][1]*P[1]+C.R[0][2]*P[2]+C.t[0],
+           C.R[1][0]*P[0]+C.R[1][1]*P[1]+C.R[1][2]*P[2]+C.t[1],
+           C.R[2][0]*P[0]+C.R[2][1]*P[1]+C.R[2][2]*P[2]+C.t[2]];
+  if(c[2]<0.8) return null;
+  return camRedist(C,[C.cx+C.f*c[0]/c[2], C.cy+C.f*c[1]/c[2]]);
+}
+const RW=140, ZOOM=6;
+const TR=100, TZ=7;
+// Three locked-off broadcast panels share this tool.  Only the plate image and
+// the per-view stores change; every interaction below is unchanged.
+const VIEWS=["wide","red_station","red_station_b","blue_station"];
+let VIEW="wide", srcMode=0, masks={}, maskData={}, showMask=true, ALLPTS={}, ALLTAGS={}, TAGVIEWS={}, plates={}, frames={}, enh={};
+const SRCNAME=['median plate','single frame','enhanced (contrast)'];
+let pairs=[], pend=null, refine=null, TAGSALL=[], GUIDES=[], fboxR=null;
+let tagMarks={}, ted=null, sel=0, drag=null, peek=false;
+const d2fX=dx=>LEN*(1-dx/FBW), d2fY=dy=>WID*(dy/FBH);
+const f2dX=X=>FBW*(1-X/LEN),   f2dY=Y=>FBH*(Y/WID);
+
+const cv=document.getElementById('cv'), cx=cv.getContext('2d');
+const cf=document.getElementById('cf'), cfx=cf.getContext('2d');
+const cr=document.getElementById('cr'), crx=cr.getContext('2d');
+const te=document.getElementById('ted'), tex=te.getContext('2d');
+const plate=new Image(), fbox=new Image();
+let ready=0, NEED=1+2*3;
+const bump=()=>{ if(++ready===NEED) boot(); };
+fbox.onload=bump;
+VIEWS.forEach(v=>{
+  const a=new Image(); a.onload=()=>{plates[v]=a;bump();}; a.onerror=bump; a.src='out/plate_'+v+'.png';
+  const b=new Image(); b.onload=()=>{frames[v]=b;bump();}; b.onerror=bump; b.src='out/frame_'+v+'.png';
+  const c=new Image(); c.onload=()=>{enh[v]=c;}; c.src='out/enh_'+v+'.png';
+  // Where the broadcast pastes its own graphics.  Found by temporal variance:
+  // an overlay is byte-identical every frame, carpet is not.
+  const m=new Image(); m.onload=()=>{
+    const k=document.createElement('canvas'); k.width=m.width; k.height=m.height;
+    const g=k.getContext('2d'); g.drawImage(m,0,0);
+    masks[v]=k; maskData[v]=g.getImageData(0,0,m.width,m.height);
+    if(fboxR) draw();          // masks can arrive before boot() builds fboxR
+  }; m.src='out/overlaymask_'+v+'.png';
+});
+fbox.src='out/field_box.png';
+
+async function boot(){
+  try{ TAGSALL=await (await fetch('out/tags.json')).json(); }catch(e){}
+  try{ TAGVIEWS=await (await fetch('out/tags_views.json')).json(); }catch(e){console.warn(e);}
+  VIEWS.forEach(v=>{ALLPTS[v]=[]; ALLTAGS[v]={};});
+  // The wide view keeps its original guide list: 12 candidates (3 auto-detected
+  // plus 9 predicted positions to hand-mark), which is richer than the 3 the
+  // detector alone finds.  The station views have no predicted guides yet --
+  // that needs a pose, which is what we are here to solve.
+  try{ const tg=await (await fetch('out/tag_guides.json')).json();
+       if(Array.isArray(tg)&&tg.length) TAGVIEWS['wide']=tg; }catch(e){}
+  // Seed the wide view with the calibration already done, so it is not lost.
+  // points_corrected.json holds TRUE field coordinates (the old mirroring was
+  // repaired there), which is exactly what the unrotated diagram expects.
+  try{ const pc=await (await fetch('out/points_corrected.json')).json();
+       if(Array.isArray(pc)) ALLPTS['wide']=pc.map(o=>({u:o.u,v:o.v,X:o.X,Y:o.Y})); }catch(e){}
+  try{ const tm=await (await fetch('out/tag_marks.json')).json();
+       if(tm&&typeof tm==='object') ALLTAGS['wide']=tm; }catch(e){}
+  // Station tags are ALL detected, with sub-pixel corners already.  Pre-fill
+  // them as marks so the solver gets those 24 corner points per view without
+  // anyone re-tracing by hand -- step 3 exists for tags the detector MISSED,
+  // which is a wide-view problem.  Any of them can still be opened and nudged.
+  VIEWS.filter(v=>v!=='wide').forEach(v=>{
+    for(const g of (TAGVIEWS[v]||[]))
+      if(g.corners && !ALLTAGS[v][g.id]) ALLTAGS[v][g.id]=g.corners;
+  });
+  try{ const j=await (await fetch('out/points_multi.json')).json();
+       if(j&&typeof j==='object') VIEWS.forEach(v=>{
+         if(j[v]&&j[v].pairs) {ALLPTS[v]=j[v].pairs; ALLTAGS[v]=j[v].tagMarks||{};}
+         else if(Array.isArray(j[v])) ALLPTS[v]=j[v];});
+  }catch(e){}
+  try{ const s2=localStorage.getItem('autoscout_calib3');
+       if(s2){const j=JSON.parse(s2); VIEWS.forEach(v=>{if(j[v]){ALLPTS[v]=j[v].pairs||[];
+              ALLTAGS[v]=j[v].tagMarks||{};}});} }catch(e){}
+  buildViewButtons();
+  // The diagram is used UNROTATED.  The old code rotated it 180 deg while using
+  // a mapping written for the unrotated image, so every click came out mirrored
+  // in X and had to be repaired downstream (points_corrected.json).  Verified
+  // against the camera model: red structures sit at field X ~12 in both.
+  fboxR=document.createElement('canvas'); fboxR.width=FBW; fboxR.height=FBH;
+  fboxR.getContext('2d').drawImage(fbox,0,0);
+  setView('wide');
+  init();
+  step3hint();
+}
+function pos(e,c){const r=c.getBoundingClientRect();
+  return {x:(e.clientX-r.left)*c.width/r.width, y:(e.clientY-r.top)*c.height/r.height};}
+
+function init(){
+  const im0=curImg(); cv.width=im0?im0.width:1920; cv.height=im0?im0.height:490;
+  cf.width=FBW; cf.height=FBH;
+  cr.width=RW*ZOOM; cr.height=RW*ZOOM; te.width=TR*TZ; te.height=TR*TZ;
+  cv.onclick=e=>openRefine('plate',pos(e,cv));
+  cf.onclick=e=>openRefine('field',pos(e,cf));
+  cr.onclick=e=>{const p=pos(e,cr); commitRefine(p.x/ZOOM,p.y/ZOOM);};
+  document.getElementById('refok').onclick=()=>commitRefine(RW/2,RW/2);
+  document.getElementById('refx').onclick=()=>{refine=null;hide('refwrap');draw();};
+  document.querySelectorAll('button.p').forEach(b=>b.onclick=()=>addField(+b.dataset.fx,+b.dataset.fy));
+  document.getElementById('undo').onclick=()=>{pairs.pop();persist();draw();queueSolve();};
+  document.getElementById('clear').onclick=()=>{
+    // current view only -- pairs aliases ALLPTS[VIEW], so truncate in place
+    if(!confirm('Clear the '+pairs.length+' points for '+VIEW+' only?')) return;
+    pairs.length=0; pend=null; persist(); draw();};
+  document.getElementById('copy').onclick=()=>{stash();navigator.clipboard.writeText(
+    JSON.stringify(Object.fromEntries(VIEWS.map(v=>[v,{pairs:ALLPTS[v],tagMarks:ALLTAGS[v]}])),null,1));};
+  document.getElementById('srctog').onclick=()=>{
+    srcMode=(srcMode+1)%3;
+    document.getElementById('srctog').textContent=SRCNAME[srcMode];
+    const im=curImg(); if(im){cv.width=im.width;cv.height=im.height;}
+    draw(); if(ted) drawTed();};
+  document.getElementById('resolve').onclick=resolve;
+  document.getElementById('caltog').onclick=()=>{ showCal=!showCal;
+    document.getElementById('caltog').textContent=showCal?'hide solved calibration (C)':'show SOLVED calibration (C)';
+    draw(); };
+  window.addEventListener('keydown',e=>{ if((e.key==='c'||e.key==='C')&&!ted){
+    document.getElementById('caltog').onclick(); e.preventDefault(); }});
+  document.getElementById('hidetog').onclick=()=>{ hideAll=!hideAll;
+    document.getElementById('hidetog').textContent=hideAll?'show overlays (H)':'hide ALL overlays (H)';
+    draw(); };
+  window.addEventListener('keydown',e=>{ if((e.key==='h'||e.key==='H')&&!ted){
+    hideAll=!hideAll;
+    document.getElementById('hidetog').textContent=hideAll?'show overlays (H)':'hide ALL overlays (H)';
+    draw(); e.preventDefault(); }});
+  document.getElementById('masktog').onclick=()=>{ showMask=!showMask;
+    document.getElementById('masktog').textContent=showMask?'hide overlay shading':'show overlay shading';
+    draw(); };
+  document.getElementById('saveall').onclick=()=>{ stash();
+    const o=Object.fromEntries(VIEWS.map(v=>[v,{pairs:ALLPTS[v],tagMarks:ALLTAGS[v]}]));
+    fetch('/points',{method:'POST',body:JSON.stringify(o)}).then(r=>r.text())
+      .then(t=>{document.getElementById('savemsg').textContent=t;
+                setTimeout(()=>document.getElementById('savemsg').textContent='',2500);})
+      .catch(e=>document.getElementById('savemsg').textContent='save failed');};
+  buildTagButtons();
+  te.onmousedown=tedDown; te.onmousemove=tedMove;
+  window.onmouseup=()=>{drag=null; te.style.cursor='grab';};
+  document.getElementById('tedsave').onclick=()=>{
+    if(ted){tagMarks[ted.id]=ted.c.map(p=>[+p[0].toFixed(2),+p[1].toFixed(2)]);
+            persist(); buildTagButtons(); drawTed(); draw(); queueSolve();}};
+  document.getElementById('tedrm').onclick=()=>{
+    if(ted){delete tagMarks[ted.id]; buildTagButtons(); drawTed(); draw();}};
+  document.getElementById('tedx').onclick=()=>{ted=null;hide('tedwrap');info();draw();};
+  window.addEventListener('keydown',tedKey);
+  window.addEventListener('keydown',e=>{if(e.code==='Space'&&ted&&!peek){e.preventDefault();peek=true;drawTed();}});
+  window.addEventListener('keyup',  e=>{if(e.code==='Space'&&ted){peek=false;drawTed();}});
+  draw();
+}
+function curImg(){
+  const pick=[plates[VIEW],frames[VIEW],enh[VIEW]][srcMode];
+  return pick || plates[VIEW] || frames[VIEW];
+}
+function buildViewButtons(){
+  const d=document.getElementById('vbtns'); d.innerHTML='';
+  VIEWS.forEach(v=>{const b=document.createElement('button');
+    b.textContent=v; b.id='vb_'+v;
+    b.onclick=()=>{stash(); setView(v); init2();}; d.appendChild(b);});
+}
+function stash(){ ALLPTS[VIEW]=pairs; ALLTAGS[VIEW]=tagMarks; persist(); }
+function persist(){ try{ const o={}; VIEWS.forEach(v=>o[v]={pairs:ALLPTS[v],tagMarks:ALLTAGS[v]});
+  localStorage.setItem('autoscout_calib3',JSON.stringify(o)); }catch(e){} }
+function setView(v){
+  VIEW=v; pairs=ALLPTS[v]||[]; tagMarks=ALLTAGS[v]||{}; pend=null; refine=null; ted=null;
+  GUIDES=(TAGVIEWS[v]||[]).slice();
+  if(v!=='wide'){
+    // The detector finds the big, well-lit tags; plenty more are visible to the
+    // eye.  Offer every field tag so any of them can be hand-marked -- more tags
+    // at more heights is exactly what breaks the focal/distance degeneracy that
+    // stops the station views solving from tags alone.
+    const have=new Set(GUIDES.map(g=>g.id));
+    for(const t of TAGSALL) if(!have.has(t.id))
+      GUIDES.push({id:t.id, X:t.X, Y:t.Y, Z:t.Z, det:false, gu:null, gv:null});
+    GUIDES.sort((a,b)=>a.id-b.id);
+  }
+  DETECTED=GUIDES.filter(g=>g.det).map(g=>g.id);
+  const im=curImg(); if(im){ plate.width=im.width; plate.height=im.height; }
+  VIEWS.forEach(x=>{const b=document.getElementById('vb_'+x);
+    if(b) b.style.outline = (x===v ? '2px solid #7cc4ff' : 'none');});
+}
+function step3hint(){
+  const h=document.getElementById('t3hint'); if(!h) return;
+  const det=GUIDES.filter(g=>g.det).length, tot=GUIDES.length;
+  h.textContent = (VIEW==='wide')
+    ? 'pick a tag, drag the 4 handles onto its corners — adds the Y/Z spread carpet points lack'
+    : `${det} auto-detected and pre-filled (green); the dimmed ones are every other field tag — `
+      + `open any you can actually see and drag the box onto it (${tot-det} available)`;
+}
+function init2(){                    // re-do the parts of init() that depend on the view
+  const im=curImg(); if(!im) return;
+  cv.width=im.width; cv.height=im.height;
+  hide('refwrap'); hide('tedwrap');
+  buildTagButtons(); step3hint(); info(); draw();
+}
+const hide=id=>document.getElementById(id).style.display='none';
+const show=id=>document.getElementById(id).style.display='block';
+
+function openRefine(which,p){
+  refine={which,cx:p.x,cy:p.y};
+  const img=which==='plate'?curImg():fboxR;
+  crx.imageSmoothingEnabled=false; crx.fillStyle='#000'; crx.fillRect(0,0,cr.width,cr.height);
+  crx.drawImage(img,p.x-RW/2,p.y-RW/2,RW,RW,0,0,cr.width,cr.height);
+  crx.strokeStyle='rgba(255,159,26,.85)'; crx.lineWidth=1; const c0=cr.width/2;
+  crx.beginPath();crx.moveTo(c0,c0-26);crx.lineTo(c0,c0+26);
+  crx.moveTo(c0-26,c0);crx.lineTo(c0+26,c0);crx.stroke();
+  document.getElementById('reflab').textContent='refine '+which+' — '+ZOOM+'x — click the exact point';
+  show('refwrap');
+  document.getElementById('refwrap').scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+function commitRefine(ox,oy){
+  if(!refine) return;
+  const nx=refine.cx-RW/2+ox, ny=refine.cy-RW/2+oy, w=refine.which;
+  refine=null; hide('refwrap');
+  if(w==='plate'){pend={x:nx,y:ny};draw();} else addField(d2fX(nx),d2fY(ny));
+}
+function addField(X,Y){
+  if(!pend){alert('Pick a point on the broadcast plate first (step 1).');return;}
+  pairs.push({u:+pend.x.toFixed(2),v:+pend.y.toFixed(2),X:+X.toFixed(4),Y:+Y.toFixed(4)});
+  pend=null; persist(); draw(); queueSolve();
+}
+
+function buildTagButtons(){
+  const d=document.getElementById('tagbtns'); d.innerHTML='';
+  for(const g of GUIDES){
+    const b=document.createElement('button');
+    b.className='tg'+(tagMarks[g.id]?' done':(g.det?' det':''));
+    b.textContent=g.id+(tagMarks[g.id]?' ✓':'');
+    b.title=tagMarks[g.id]?'marked':(g.det?'auto-detected':'not detected — open to place it by hand');
+    if(!tagMarks[g.id]&&!g.det) b.style.opacity='.55';
+    b.onclick=()=>openTed(g.id);
+    b.onmouseenter=()=>{hintId=g.id; draw();};
+    b.onmouseleave=()=>{if(hintId===g.id){hintId=null; draw();}};
+    d.appendChild(b);
+  }
+}
+function openTed(id){
+  const g=GUIDES.find(x=>x.id===id);
+  let c=tagMarks[id];
+  if(!c){
+    const im=curImg();
+    // no detected or predicted position: start centred so it can be dragged on
+    const gu=(g.gu==null? (im?im.width/2:960) : g.gu);
+    const gv=(g.gv==null? (im?im.height/2:270) : g.gv);
+    const s=7; c=[[gu-s,gv-s],[gu+s,gv-s],[gu+s,gv+s],[gu-s,gv+s]];
+  }
+  const mx=c.reduce((a,p)=>a+p[0],0)/4, my=c.reduce((a,p)=>a+p[1],0)/4;
+  ted={id:id,c:c.map(p=>[p[0],p[1]]),ox:mx-TR/2,oy:my-TR/2,Z:g.Z};
+  sel=0; show('tedwrap'); drawTed(); info();
+  document.getElementById('tedwrap').scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+const n2e=(nx,ny)=>[(nx-ted.ox)*TZ,(ny-ted.oy)*TZ];
+const e2n=(ex,ey)=>[ex/TZ+ted.ox, ey/TZ+ted.oy];
+function ring(p,R,G){                     // circle + 4 arms, centre left empty
+  tex.beginPath(); tex.arc(p[0],p[1],R,0,7); tex.stroke();
+  tex.beginPath();
+  tex.moveTo(p[0]-R,p[1]); tex.lineTo(p[0]-G,p[1]);
+  tex.moveTo(p[0]+G,p[1]); tex.lineTo(p[0]+R,p[1]);
+  tex.moveTo(p[0],p[1]-R); tex.lineTo(p[0],p[1]-G);
+  tex.moveTo(p[0],p[1]+G); tex.lineTo(p[0],p[1]+R);
+  tex.stroke();
+}
+function drawTed(){
+  if(!ted) return;
+  tex.imageSmoothingEnabled=false; tex.fillStyle='#000'; tex.fillRect(0,0,te.width,te.height);
+  tex.drawImage(curImg(),ted.ox,ted.oy,TR,TR,0,0,te.width,te.height);
+  if(peek){ document.getElementById('tedlab').textContent=
+      'tag '+ted.id+' — PEEK (release space to restore overlay)'; return; }
+  const P=ted.c.map(p=>n2e(p[0],p[1]));
+  tex.beginPath(); P.forEach((p,i)=>i?tex.lineTo(p[0],p[1]):tex.moveTo(p[0],p[1])); tex.closePath();
+  tex.fillStyle='rgba(72,201,138,.10)'; tex.fill();
+  tex.strokeStyle='rgba(72,201,138,.85)'; tex.lineWidth=2; tex.stroke();
+  P.forEach((p,i)=>{
+    const on=i===sel, R=on?15:12, G=6;      // G = clear radius: nothing is drawn inside it
+    tex.strokeStyle='rgba(0,0,0,.75)'; tex.lineWidth=4; ring(p,R,G);
+    tex.strokeStyle=on?'#ffd400':'#48c98a'; tex.lineWidth=2; ring(p,R,G);
+    tex.fillStyle=on?'#ffd400':'#48c98a'; tex.font='bold 12px monospace';
+    tex.fillText(i+1,p[0]+R+3,p[1]-R-1);
+  });
+  document.getElementById('tedlab').textContent=
+    'tag '+ted.id+' — '+TZ+'x — drag (grab off-centre), arrows 1px, shift 0.2px, SPACE peeks'
+    +(tagMarks[ted.id]?'  [saved]':'  [unsaved]');
+}
+function tedDown(e){
+  if(!ted) return;
+  const p=pos(e,te);
+  let best=-1,bd=1e9;
+  ted.c.forEach((q,i)=>{const E=n2e(q[0],q[1]);
+    const d=Math.hypot(E[0]-p.x,E[1]-p.y); if(d<bd){bd=d;best=i;}});
+  if(bd<26){ sel=best;
+    const E=n2e(ted.c[best][0],ted.c[best][1]);
+    drag={mode:'corner',i:best,dx:(E[0]-p.x)/TZ,dy:(E[1]-p.y)/TZ}; }
+  else { drag={mode:'move',last:e2n(p.x,p.y)}; te.style.cursor='grabbing'; }
+  drawTed();
+}
+function tedMove(e){
+  if(!ted||!drag) return;
+  const p=pos(e,te), n=e2n(p.x,p.y);
+  if(drag.mode==='corner'){ ted.c[drag.i]=[n[0]+drag.dx, n[1]+drag.dy]; }
+  else { const dx=n[0]-drag.last[0], dy=n[1]-drag.last[1];
+         ted.c=ted.c.map(q=>[q[0]+dx,q[1]+dy]); drag.last=n; }
+  drawTed(); info();
+}
+function tedKey(e){
+  if(!ted) return;
+  const k={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[e.key];
+  if(!k) return;
+  e.preventDefault();
+  const s=e.shiftKey?0.2:1;
+  ted.c[sel]=[ted.c[sel][0]+k[0]*s, ted.c[sel][1]+k[1]*s];
+  drawTed(); info();
+}
+function info(){
+  const el=document.getElementById('tedinfo');
+  if(!ted){ el.textContent='no tag open — '+Object.keys(tagMarks).length+' tag(s) marked'; return; }
+  const c=ted.c, side=(a,b)=>Math.hypot(c[a][0]-c[b][0],c[a][1]-c[b][1]);
+  const ctr=[c.reduce((a,p)=>a+p[0],0)/4, c.reduce((a,p)=>a+p[1],0)/4];
+  el.textContent=
+    'tag '+ted.id+'  Z='+(ted.Z/0.0254).toFixed(2)+' in above carpet\n'+
+    'centre ('+ctr[0].toFixed(2)+', '+ctr[1].toFixed(2)+')   sides '+
+    side(0,1).toFixed(1)+' '+side(1,2).toFixed(1)+' '+side(2,3).toFixed(1)+' '+side(3,0).toFixed(1)+' px\n'+
+    'marked so far: '+(Object.keys(tagMarks).sort((a,b)=>a-b).join(', ')||'none');
+}
+
+function solveH(ps){
+  if(ps.length<4) return null;
+  const sf=1/10, si=1/1000, n=ps.length, A=[], b=[];
+  for(const p of ps){ const X=p.X*sf,Y=p.Y*sf,u=p.u*si,v=p.v*si;
+    A.push([X,Y,1,0,0,0,-u*X,-u*Y]); b.push(u);
+    A.push([0,0,0,X,Y,1,-v*X,-v*Y]); b.push(v); }
+  const N=8,M=[];
+  for(let i=0;i<N;i++){ M.push(new Array(N+1).fill(0));
+    for(let j=0;j<N;j++) for(let k=0;k<2*n;k++) M[i][j]+=A[k][i]*A[k][j];
+    for(let k=0;k<2*n;k++) M[i][N]+=A[k][i]*b[k]; }
+  for(let i=0;i<N;i++){ let q=i;
+    for(let r=i+1;r<N;r++) if(Math.abs(M[r][i])>Math.abs(M[q][i])) q=r;
+    const t=M[i];M[i]=M[q];M[q]=t;
+    if(Math.abs(M[i][i])<1e-12) return null;
+    for(let r=0;r<N;r++){ if(r===i) continue; const f=M[r][i]/M[i][i];
+      for(let c2=i;c2<=N;c2++) M[r][c2]-=f*M[i][c2]; } }
+  const h=M.map((r,i)=>r[N]/M[i][i]);
+  const Hp=[[h[0],h[1],h[2]],[h[3],h[4],h[5]],[h[6],h[7],1]], H=[[0,0,0],[0,0,0],[0,0,0]];
+  for(let i=0;i<3;i++)for(let j=0;j<3;j++){
+    const rs=(i<2)?1/si:1, cs=(j<2)?sf:1; H[i][j]=Hp[i][j]*rs*cs; }
+  return H;
+}
+const proj=(H,X,Y)=>{const w=H[2][0]*X+H[2][1]*Y+H[2][2];
+  return [(H[0][0]*X+H[0][1]*Y+H[0][2])/w,(H[1][0]*X+H[1][1]*Y+H[1][2])/w];};
+
+function draw(){
+  if(!fboxR) return;                        // not booted yet
+  const _im=curImg(); if(_im) cx.drawImage(_im,0,0); cfx.drawImage(fboxR,0,0);
+  if(hideAll){ stats(solveH(pairs)); return; }   // raw image only, still clickable
+  const MD=maskData[VIEW];
+  if(showMask && masks[VIEW]){                 // tint the broadcast graphics
+    cx.save(); cx.globalAlpha=0.55; cx.globalCompositeOperation='multiply';
+    cx.drawImage(masks[VIEW],0,0,cv.width,cv.height); cx.restore();
+    cx.save(); cx.globalAlpha=0.22; cx.fillStyle='#ff3b6b';
+    cx.globalCompositeOperation='source-atop'; cx.restore();
+  }
+  for(const t of TAGSALL){
+    const fx=f2dX(t.X), fy=f2dY(t.Y), hot=DETECTED.indexOf(t.id)>=0, mk=!!tagMarks[t.id];
+    cfx.beginPath(); cfx.arc(fx,fy,(hot||mk)?14:8,0,7);
+    cfx.fillStyle=mk?'#48c98a':(hot?'#ffd400':'rgba(255,95,95,.9)'); cfx.fill();
+    if(hot||mk){cfx.strokeStyle='#1a1a1a';cfx.lineWidth=3;cfx.stroke();}
+    cfx.fillStyle=mk?'#9df0c4':(hot?'#ffd400':'#ff9a9a');
+    cfx.font='bold '+((hot||mk)?32:22)+'px monospace';
+    cfx.fillText(t.id,fx+((hot||mk)?18:11),fy-((hot||mk)?14:9));
+  }
+  if(showCal && CAMS[VIEW]){
+    const C=CAMS[VIEW];
+    const seg=(pts,col,wd)=>{ cx.strokeStyle=col; cx.lineWidth=wd; let on=false;
+      for(const P of pts){ const q=camProject(C,P);
+        if(q && isFinite(q[0]) && Math.abs(q[0])<4000 && Math.abs(q[1])<4000){
+          on?cx.lineTo(q[0],q[1]):(cx.beginPath(),cx.moveTo(q[0],q[1]),on=true);
+        } else if(on){ cx.stroke(); on=false; } }
+      if(on) cx.stroke(); };
+    for(const Y of [0,WID]){ const p=[]; for(let i=0;i<=400;i++) p.push([i/400*LEN,Y,0]); seg(p,'#39ff88',4); }
+    for(let X=0;X<=LEN+1e-6;X+=2){ const p=[]; for(let i=0;i<=150;i++) p.push([Math.min(X,LEN),i/150*WID,0]); seg(p,'#39ff88',2); }
+    for(let Y=2;Y<WID;Y+=2){ const p=[]; for(let i=0;i<=300;i++) p.push([i/300*LEN,Y,0]); seg(p,'rgba(57,255,136,.55)',1); }
+  }
+  const H=solveH(pairs);
+  if(H && !showCal){
+    // Clip to the panel.  Projecting the far half of the field through a
+    // station homography sends points behind the horizon or thousands of pixels
+    // away, and drawing those unclipped is what makes the grid look deranged.
+    const M=200, inside=q=>isFinite(q[0])&&isFinite(q[1])&&
+      q[0]>-M&&q[0]<cv.width+M&&q[1]>-M&&q[1]<cv.height+M;
+    const seg=pts=>{ let on=false;
+      for(const q of pts){
+        if(inside(q)){ on?cx.lineTo(q[0],q[1]):(cx.beginPath(),cx.moveTo(q[0],q[1]),on=true); }
+        else if(on){ cx.stroke(); on=false; }
+      }
+      if(on) cx.stroke(); };
+    cx.strokeStyle='rgba(0,220,255,.65)'; cx.lineWidth=4;
+    for(let X=0;X<=LEN+1e-6;X+=1){
+      const pts=[]; for(let t=0;t<=40;t++) pts.push(proj(H,Math.min(X,LEN),t/40*WID)); seg(pts); }
+    for(let Y=0;Y<=WID+1e-6;Y+=1){
+      const pts=[]; for(let t=0;t<=40;t++) pts.push(proj(H,t/40*LEN,Math.min(Y,WID))); seg(pts); }
+    cx.strokeStyle='#ff3b6b'; cx.lineWidth=7;
+    const bd=[[0,0],[LEN,0],[LEN,WID],[0,WID],[0,0]], bp=[];
+    for(let i=0;i<bd.length-1;i++)
+      for(let t=0;t<40;t++) bp.push(proj(H, bd[i][0]+(bd[i+1][0]-bd[i][0])*t/40,
+                                            bd[i][1]+(bd[i+1][1]-bd[i][1])*t/40));
+    bp.push(proj(H,0,0)); seg(bp);
+  }
+  // On the diagram, shade the field where this camera CANNOT be clicked --
+  // either off-panel or behind a broadcast graphic.  That is the practical
+  // answer to "where do I find a feature to mark".
+  if(showMask && MD && H && VIEW!=='wide'){
+    const NX=90, NY=46, cw=FBW/NX, ch=FBH/NY;
+    cfx.save(); cfx.fillStyle='rgba(255,60,60,.30)';
+    for(let i=0;i<NX;i++) for(let j=0;j<NY;j++){
+      const X=(i+0.5)/NX*LEN, Y=(j+0.5)/NY*WID;
+      const q=proj(H,X,Y);
+      let bad=!(q[0]>=0&&q[0]<cv.width&&q[1]>=0&&q[1]<cv.height);
+      if(!bad){
+        const mx=Math.round(q[0]*MD.width/cv.width), my=Math.round(q[1]*MD.height/cv.height);
+        const o=4*(my*MD.width+mx);
+        bad = MD.data[o]>128;
+      }
+      if(bad) cfx.fillRect(f2dX(X)-cw/2,f2dY(Y)-ch/2,cw+1,ch+1);
+    }
+    cfx.restore();
+  }
+  for(const g of GUIDES){
+    if(tagMarks[g.id]){
+      const q=tagMarks[g.id];
+      cx.beginPath(); q.forEach((p,i)=>i?cx.lineTo(p[0],p[1]):cx.moveTo(p[0],p[1])); cx.closePath();
+      cx.fillStyle='rgba(72,201,138,.35)'; cx.fill();
+      cx.strokeStyle='#48c98a'; cx.lineWidth=3; cx.stroke();
+      cx.fillStyle='#48c98a'; cx.font='bold 26px monospace'; cx.fillText(g.id,q[0][0]+16,q[0][1]-10);
+    } else if(!g.det){
+      // Where to look for an unmarked tag.  The wide view has a predicted image
+      // position; the station views do not (that needs the pose we are solving
+      // for), so fall back to the tag's GROUND position via the carpet
+      // homography and point upwards -- the tag hangs about Z metres above it.
+      // 26 unmarked tags drawn at once is unreadable, so only the one being
+      // hovered or edited gets the full hint; the rest stay as faint dots.
+      const full = (hintId===g.id) || (ted && ted.id===g.id);
+      let gu=g.gu, gv=g.gv, viaGround=false;
+      if((gu==null||gv==null) && H && g.X!==undefined){
+        const q=proj(H,g.X,g.Y); gu=q[0]; gv=q[1]; viaGround=true;
+      }
+      if(gu!=null && gv!=null && gu>-60 && gu<cv.width+60 && gv>-60 && gv<cv.height+60){
+        if(!full){
+          cx.fillStyle='rgba(255,150,40,.42)';
+          cx.beginPath(); cx.arc(gu,gv,5,0,7); cx.fill();
+        } else {
+        cx.strokeStyle='rgba(255,140,0,.95)'; cx.lineWidth=3;
+        cx.beginPath(); cx.arc(gu,gv,20,0,7); cx.stroke();
+        cx.fillStyle='rgba(255,170,60,.98)'; cx.font='bold 26px monospace';
+        cx.fillText(g.id,gu+24,gv-12);
+        if(viaGround){
+          const zpx=Math.max(40,(g.Z||1.1)*70);         // rough visual cue, not metric
+          cx.setLineDash([7,6]); cx.lineWidth=2;
+          cx.beginPath(); cx.moveTo(gu,gv-22); cx.lineTo(gu,gv-zpx); cx.stroke();
+          cx.setLineDash([]);
+          cx.beginPath(); cx.moveTo(gu-7,gv-zpx+9); cx.lineTo(gu,gv-zpx);
+          cx.lineTo(gu+7,gv-zpx+9); cx.stroke();
+          cx.font='bold 17px monospace'; cx.fillStyle='rgba(255,190,110,.95)';
+          cx.fillText((g.Z||1.1).toFixed(2)+'m up', gu+10, gv-zpx+4);
+        }
+        }
+      }
+    }
+  }
+  for(const t of GUIDES.filter(g=>g.det)){
+    cx.strokeStyle='#ffd400'; cx.lineWidth=6; cx.beginPath();
+    cx.moveTo(t.gu-30,t.gv);cx.lineTo(t.gu+30,t.gv);
+    cx.moveTo(t.gu,t.gv-30);cx.lineTo(t.gu,t.gv+30); cx.stroke();
+  }
+  pairs.forEach((p,i)=>{mark(cx,p.u,p.v,'#39d98a',i+1); mark(cfx,f2dX(p.X),f2dY(p.Y),'#39d98a',i+1);});
+  if(pend) mark(cx,pend.x,pend.y,'#ff9f1a','?');
+  stats(H);
+}
+function mark(c,x,y,col,lab){
+  const k=c.canvas.width/620;
+  c.strokeStyle=col;c.lineWidth=2.2*k;c.beginPath();c.arc(x,y,6*k,0,7);c.stroke();
+  c.beginPath();c.moveTo(x-11*k,y);c.lineTo(x+11*k,y);c.moveTo(x,y-11*k);c.lineTo(x,y+11*k);c.stroke();
+  c.fillStyle=col;c.font='bold '+Math.round(13*k)+'px monospace';c.fillText(lab,x+12*k,y-6*k);
+}
+
+function spreadInfo(){
+  // A homography needs points spread over the plane, not just numerous.  Four
+  // pairs give exactly 8 equations for its 8 DOF, so the fit is exact by
+  // construction and its residual tests nothing -- the number only becomes
+  // meaningful at 5.  And points clustered in a narrow band extrapolate badly
+  // outside it, which looks like a "wrong" grid near the sidelines.
+  if(!pairs.length) return '';
+  const X=pairs.map(p=>p.X), Y=pairs.map(p=>p.Y);
+  const dx=Math.max(...X)-Math.min(...X), dy=Math.max(...Y)-Math.min(...Y);
+  let msg=`spread: X ${Math.min(...X).toFixed(1)}..${Math.max(...X).toFixed(1)} m (${dx.toFixed(1)} of ${LEN.toFixed(1)})`
+        + `   Y ${Math.min(...Y).toFixed(1)}..${Math.max(...Y).toFixed(1)} m (${dy.toFixed(1)} of ${WID.toFixed(1)})`;
+  if(pairs.length===4) msg+='\n!! exactly 4 points: the fit is exact by construction, RMS is meaningless. Add a 5th.';
+  if(dy<WID*0.45) msg+='\n!! points clustered across the field width — add some near each sideline or the grid will extrapolate badly';
+  if(dx<LEN*0.45) msg+='\n!! points clustered along the field length — spread them near-to-far';
+  return msg;
+}
+function solveInfo(){
+  // What the FULL 3D solve will actually get.  The ground-plane RMS above is
+  // only a click-consistency check on the carpet points; the tags are off that
+  // plane by ~1 m and cannot join it, but they carry the 3D solve.  What limits
+  // that solve is not the number of constraints -- it is their VERTICAL spread:
+  // tags alone sit in a 0.2 m band, which is why focal and distance cannot be
+  // separated from them.
+  const marked=GUIDES.filter(g=>tagMarks[g.id]);
+  const zs=pairs.map(()=>0).concat(marked.map(g=>g.Z||0));
+  const npts=pairs.length+4*marked.length;
+  if(!zs.length) return 'no constraints yet';
+  const lo=Math.min(...zs), hi=Math.max(...zs);
+  const ok = (hi-lo)>0.6 && pairs.length>=4;
+  return `3D solve: ${npts} points (${pairs.length} carpet + ${marked.length} tags x4 corners) `
+       + `= ${2*npts} equations for 10 unknowns\n`
+       + `vertical spread ${lo.toFixed(2)}..${hi.toFixed(2)} m `
+       + (ok ? '(good — focal is separable)'
+             : (pairs.length<4 ? '(need carpet points at Z=0 to separate focal from distance)'
+                               : '(too flat — add carpet points and/or tags at other heights)'));
+}
+
+function stats(H){
+  const s=document.getElementById('stat');
+  const nt=Object.keys(tagMarks).length;
+  if(!H){ s.textContent='carpet points '+pairs.length+' — need 4 for the ground-plane check.'
+            +'   tags marked '+nt+' (used by the 3D solver, not by this check:'
+            +' tags sit ~1.1 m up, a ground homography needs Z=0 points)\n'+solveInfo()
+            +(spreadInfo()?'\n'+spreadInfo():'');
+          document.getElementById('tbl').innerHTML='';   // else the previous view's rows linger
+          window.CALIB={pairs:pairs,tagMarks:tagMarks,H:null}; return; }
+  let se=0,mx=0,rows='';
+  for(const p of pairs){ const q=proj(H,p.X,p.Y), e=Math.hypot(q[0]-p.u,q[1]-p.v);
+    se+=e*e; mx=Math.max(mx,e);
+    rows+='<tr><td>'+p.u.toFixed(1)+'</td><td>'+p.v.toFixed(1)+'</td><td>'+p.X.toFixed(3)+
+          '</td><td>'+p.Y.toFixed(3)+'</td><td>'+e.toFixed(2)+'</td></tr>'; }
+  const rms=Math.sqrt(se/pairs.length);
+  const vx=H[0][0]/H[2][0];
+  // MUST use detector-measured positions (ou), never guide positions derived from H,
+  // or the check becomes circular and validates H against itself.
+  const T=GUIDES.filter(g=>g.det&&g.ou!==undefined).map(g=>({X:g.X,x:g.ou}));
+  let vt='n/a';
+  if(T.length===3){ const d=t=>(t.x-vx), A=T[0],B=T[1],C=T[2];
+    const pr=(A.X-C.X)/(A.X-B.X), me=(1/d(A)-1/d(C))/(1/d(A)-1/d(B));
+    vt='pred '+pr.toFixed(4)+' meas '+me.toFixed(4)+' err '+(100*Math.abs(me-pr)/Math.abs(pr)).toFixed(2)+'%'; }
+  s.textContent='carpet points '+pairs.length+'   ground-plane RMS '+rms.toFixed(2)+' px   max '+mx.toFixed(2)+' px\n'+
+                'held-out AprilTag cross-ratio: '+vt+'\n'+
+                'tags marked: '+nt+(VIEW==='wide'?'/9 new  (orange circles = where to look)'
+                  :'  (tags feed the 3D solve; the RMS above is carpet points only)')+'\n'+solveInfo()
+                +(spreadInfo()?'\n'+spreadInfo():'');
+  document.getElementById('tbl').innerHTML=
+    '<table><tr><th>u</th><th>v</th><th>X m</th><th>Y m</th><th>err px</th></tr>'+rows+'</table>';
+  window.CALIB={pairs:pairs,tagMarks:tagMarks,H:H};
+}
+</script>

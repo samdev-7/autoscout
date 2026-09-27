@@ -1,0 +1,155 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>autoscout — label robots</title>
+<style>
+  *{box-sizing:border-box}
+  body{background:#14161a;color:#e6e8eb;font:13px/1.45 -apple-system,system-ui,sans-serif;
+       margin:0;padding:10px 12px;max-width:1440px}
+  #wrap{border:1px solid #2b313a;border-radius:6px;background:#0d0f12;overflow:auto}
+  canvas{display:block;cursor:none}
+  #bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:8px 0}
+  button{background:#232a35;color:#e6e8eb;border:1px solid #39424f;border-radius:5px;
+         padding:5px 10px;font-size:12px;cursor:pointer}
+  button:hover{background:#2e3846}
+  button.on{outline:2px solid #fff}
+  button.red{background:#5c1d1d;border-color:#a33}
+  button.blue{background:#17365c;border-color:#3a7fd5}
+  button.go{background:#1c4a32;border-color:#2f7d51}
+  #stat{font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap;
+        background:#0d0f12;border:1px solid #2b313a;border-radius:6px;padding:8px 10px;color:#b9c6d6}
+  .k{color:#7d8899;font-size:11px;font-family:ui-monospace,monospace}
+</style>
+
+<div id="stat">loading…</div>
+<div id="bar">
+  <button id="prev">◀ prev</button><button id="next">next ▶</button>
+  <button id="cred" class="red on">RED (r)</button>
+  <button id="cblue" class="blue">BLUE (b)</button>
+  <button id="del">delete sel (⌫)</button>
+  <button id="clr">clear frame</button>
+  <button id="exp" class="go">export JSON</button>
+  <span class="k">|</span>
+  <button class="z on" data-z="0">fit</button><button class="z" data-z="1">1x</button>
+  <button class="z" data-z="2">2x</button><button class="z" data-z="3">3x</button>
+  <span class="k">click corner → click opposite corner · esc cancels · click box = select</span>
+</div>
+<div id="wrap"><canvas id="cv"></canvas></div>
+
+<script>
+let man=null,B0=0,B1=490,idx=0,cls='R',labels={},img=new Image();
+let sel=null,anchor=null,mouse=null,zoom=0;
+const LS='autoscout_labels_v1';
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+
+fetch('out/frames.json').then(r=>r.json()).then(m=>{
+  man=m; B0=m.band[0]; B1=m.band[1];
+  try{ labels=JSON.parse(localStorage.getItem(LS))||{}; }catch(e){ labels={}; }
+  cv.width=1920; cv.height=B1-B0;
+  document.getElementById('prev').onclick=()=>go(-1);
+  document.getElementById('next').onclick=()=>go(1);
+  document.getElementById('cred').onclick=()=>setCls('R');
+  document.getElementById('cblue').onclick=()=>setCls('B');
+  document.getElementById('del').onclick=delSel;
+  document.getElementById('clr').onclick=()=>{cur().length=0;save();draw();};
+  document.getElementById('exp').onclick=exportJSON;
+  document.querySelectorAll('button.z').forEach(b=>b.onclick=()=>setZoom(+b.dataset.z,b));
+  cv.onmousemove=e=>{ mouse=pos(e); draw(); };
+  cv.onmouseleave=()=>{ mouse=null; draw(); };
+  cv.onclick=click;
+  window.addEventListener('keydown',key);
+  setZoom(0,document.querySelector('button.z'));
+  load();
+});
+const cur=()=>{ const f=man.frames[idx].file; if(!labels[f]) labels[f]=[]; return labels[f]; };
+const save=()=>localStorage.setItem(LS,JSON.stringify(labels));
+function load(){ img=new Image(); img.onload=draw; img.src='out/frames/'+man.frames[idx].file;
+  sel=null; anchor=null; }
+function go(d){ idx=Math.max(0,Math.min(man.frames.length-1,idx+d)); load(); }
+function setZoom(z,btn){ zoom=z;
+  document.querySelectorAll('button.z').forEach(b=>b.classList.remove('on'));
+  if(btn) btn.classList.add('on');
+  cv.style.width = z===0 ? '100%' : (1920*z)+'px';
+  cv.style.height='auto'; draw(); }
+function setCls(c){ cls=c;
+  document.getElementById('cred').classList.toggle('on',c==='R');
+  document.getElementById('cblue').classList.toggle('on',c==='B');
+  if(sel!==null){ cur()[sel].c=c; save(); }
+  draw(); }
+function delSel(){ if(sel!==null){ cur().splice(sel,1); sel=null; save(); draw(); } }
+function key(e){
+  if(e.key==='r') setCls('R');
+  else if(e.key==='b') setCls('B');
+  else if(e.key==='Escape'){ anchor=null; draw(); }
+  else if(e.key==='Delete'||e.key==='Backspace'){ e.preventDefault(); delSel(); }
+  else if(e.key===','||e.key==='ArrowLeft') go(-1);
+  else if(e.key==='.'||e.key==='ArrowRight') go(1);
+  else return;
+}
+function pos(e){ const r=cv.getBoundingClientRect();
+  return {x:(e.clientX-r.left)*cv.width/r.width, y:(e.clientY-r.top)*cv.height/r.height}; }
+function click(e){
+  const p=pos(e);
+  if(anchor){                                   // second click completes the box
+    const b={x0:Math.min(anchor.x,p.x),x1:Math.max(anchor.x,p.x),
+             y0:Math.min(anchor.y,p.y)+B0,y1:Math.max(anchor.y,p.y)+B0,c:cls};
+    anchor=null;
+    if(b.x1-b.x0>=5 && b.y1-b.y0>=5){ cur().push(b); sel=cur().length-1; save(); }
+    draw(); return;
+  }
+  const gy=p.y+B0;
+  const hit=cur().findIndex(b=>p.x>=b.x0-2&&p.x<=b.x1+2&&gy>=b.y0-2&&gy<=b.y1+2);
+  if(hit>=0 && !e.shiftKey){ sel=hit; draw(); return; }   // shift = new box over an old one
+  anchor={x:p.x,y:p.y}; sel=null; draw();
+}
+function draw(){
+  if(!img.complete||!man) return;
+  const W=cv.width,H=cv.height;
+  ctx.imageSmoothingEnabled=false;
+  ctx.drawImage(img,0,B0,W,H,0,0,W,H);
+  const k=zoom===0 ? 1920/(cv.getBoundingClientRect().width||612) : 1/zoom;  // px per screen px
+  cur().forEach((b,j)=>{
+    const x=b.x0,y=b.y0-B0,w=b.x1-b.x0,h=b.y1-b.y0;
+    const col=b.c==='R'?'#ff4d4d':'#4da3ff';
+    ctx.fillStyle=b.c==='R'?'rgba(255,77,77,.13)':'rgba(77,163,255,.13)'; ctx.fillRect(x,y,w,h);
+    ctx.strokeStyle=col; ctx.lineWidth=(j===sel?2.5:1.6)*k; ctx.strokeRect(x,y,w,h);
+    ctx.strokeStyle='#fff'; ctx.lineWidth=2*k;         // bottom edge = floor contact
+    ctx.beginPath(); ctx.moveTo(x,y+h); ctx.lineTo(x+w,y+h); ctx.stroke();
+    if(j===sel){ ctx.fillStyle='#ffd400';
+      [[x,y+h],[x+w,y+h]].forEach(p=>ctx.fillRect(p[0]-2.5*k,p[1]-2.5*k,5*k,5*k)); }
+  });
+  if(anchor&&mouse){                              // live preview rectangle
+    const x=Math.min(anchor.x,mouse.x),y=Math.min(anchor.y,mouse.y);
+    const w=Math.abs(mouse.x-anchor.x),h=Math.abs(mouse.y-anchor.y);
+    ctx.strokeStyle=cls==='R'?'#ff4d4d':'#4da3ff';
+    ctx.setLineDash([6*k,4*k]); ctx.lineWidth=1.6*k; ctx.strokeRect(x,y,w,h);
+    ctx.setLineDash([]);
+  }
+  if(anchor){                                     // anchored guides stay put
+    ctx.strokeStyle='rgba(255,212,0,.75)'; ctx.lineWidth=1*k;
+    ctx.beginPath(); ctx.moveTo(anchor.x,0); ctx.lineTo(anchor.x,H);
+    ctx.moveTo(0,anchor.y); ctx.lineTo(W,anchor.y); ctx.stroke();
+  }
+  if(mouse){                                      // photoshop-style full-span crosshair
+    ctx.strokeStyle='rgba(0,230,255,.85)'; ctx.lineWidth=1*k;
+    ctx.beginPath(); ctx.moveTo(mouse.x,0); ctx.lineTo(mouse.x,H);
+    ctx.moveTo(0,mouse.y); ctx.lineTo(W,mouse.y); ctx.stroke();
+  }
+  const done=Object.values(labels).filter(v=>v.length).length;
+  const tot=Object.values(labels).reduce((a,v)=>a+v.length,0);
+  const n=cur().length,r=cur().filter(b=>b.c==='R').length;
+  document.getElementById('stat').textContent=
+    `frame ${idx+1}/${man.frames.length}  t=${man.frames[idx].t}s  ${man.frames[idx].file}`+
+    (mouse?`   cursor ${mouse.x.toFixed(0)},${(mouse.y+B0).toFixed(0)}`:'')+'\n'+
+    `this frame: ${n} boxes (${r} red, ${n-r} blue)   class: ${cls==='R'?'RED':'BLUE'}`+
+    (anchor?'   ← first corner set, click opposite corner (esc cancels)':'')+'\n'+
+    `progress: ${done} frames labelled, ${tot} boxes total   (white edge = floor contact)`;
+  window.LABELS=labels;
+}
+function exportJSON(){
+  const out={band:[B0,B1],w:1920,h:490,frames:{}};
+  for(const f in labels) if(labels[f].length) out.frames[f]=labels[f];
+  const s=JSON.stringify(out); window.EXPORT=s;
+  navigator.clipboard.writeText(s).then(()=>alert('copied '+
+    Object.keys(out.frames).length+' frames to clipboard'));
+}
+</script>

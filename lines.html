@@ -1,0 +1,219 @@
+<meta charset="utf-8">
+<title>autoscout — straight-line calibration</title>
+<style>
+:root{--bg:#14161a;--fg:#e8eaed;--dim:#9aa0a6;--line:#2a2e35;--acc:#7cc4ff;--ok:#6ee7a0}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 ui-sans-serif,system-ui,sans-serif}
+header{display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line);
+       flex-wrap:wrap;position:sticky;top:0;background:var(--bg);z-index:5}
+button{background:#242830;color:var(--fg);border:1px solid var(--line);border-radius:4px;
+       padding:4px 10px;cursor:pointer;font:inherit}
+button.on{outline:2px solid var(--acc)}
+button.go{background:#1c4a32;border-color:#2f7d51}
+.box{margin:0 12px;line-height:0;border:1px solid var(--line)}
+canvas{display:block;width:100%;height:auto;cursor:crosshair}
+#stat{padding:8px 12px;color:var(--dim);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px}
+#lohdr{background:#1d3a5c;color:#cfe3fb;padding:4px 8px;font-size:11px;display:flex;justify-content:space-between;gap:10px}
+#loupewrap{position:fixed;right:12px;bottom:12px;border:2px solid var(--acc);background:#000;display:none;z-index:9}
+b.k{background:#242830;border-radius:3px;padding:1px 5px}
+#lines{padding:4px 12px 20px;font-family:ui-monospace,monospace;font-size:12px}
+.lrow{padding:2px 0}
+.lrow button{padding:1px 6px;font-size:11px;margin-left:4px}
+</style>
+<header>
+  <span style="color:var(--dim)">view</span><span id="views" style="display:flex;gap:6px"></span>
+  <span style="width:8px"></span>
+  <span style="color:var(--dim)">this line is</span>
+  <button id="d_x" class="on">along field X</button><button id="d_y">along field Y</button>
+  <button id="d_v">vertical</button><button id="d_u">unknown</button>
+  <span style="width:8px"></span>
+  <button id="finish" class="go">finish line (Enter)</button>
+  <button id="fitog" class="on">show fit (F)</button>
+  <button id="undo">undo point</button><button id="save" class="go">save</button>
+  <span id="msg" style="color:var(--acc)"></span>
+</header>
+<div id="stat">loading…</div>
+<div class="box"><canvas id="cv"></canvas></div>
+<div id="loupewrap"><div id="lohdr"><span id="lolab">refine</span>
+  <span><button id="lok">use centre</button><button id="lx">cancel</button></span></div>
+  <canvas id="lo"></canvas></div>
+<div id="lines"></div>
+<script>
+// Straight lines calibrate what ground points cannot.  A real straight edge must
+// project to a straight line once distortion is removed -- that pins k1 with no
+// pose involved.  And families of parallel lines meet at vanishing points, whose
+// orthogonality pins focal length and rotation, again without needing position.
+// That splits the problem the ground points were being asked to solve alone.
+const VIEWS=['wide','red_station','red_station_b','blue_station'];
+const DIRS=[['d_x','X'],['d_y','Y'],['d_v','V'],['d_u','?']];
+const RW=120, ZOOM=4;
+let VIEW='red_station', dir='X', data={}, cur=[], img=null, imgs={}, refine=null;
+const cv=document.getElementById('cv'), cx=cv.getContext('2d');
+const lo=document.getElementById('lo'), lox=lo.getContext('2d');
+VIEWS.forEach(v=>{const b=document.createElement('button'); b.textContent=v; b.id='v_'+v;
+  b.onclick=()=>{VIEW=v; cur=[]; setV(); }; document.getElementById('views').appendChild(b);
+  data[v]=[]; const im=new Image(); im.onload=()=>{imgs[v]=im; if(v===VIEW) setV();};
+  im.src='out/plate_'+v+'.png';});
+DIRS.forEach(([id,d])=>document.getElementById(id).onclick=()=>{dir=d;
+  DIRS.forEach(([i2,d2])=>document.getElementById(i2).classList.toggle('on',d2===d)); draw();});
+fetch('out/lines_multi.json').then(r=>r.ok?r.json():null).then(j=>{
+  if(j) for(const v of VIEWS) if(j[v]) data[v]=j[v];
+  try{const s=localStorage.getItem('autoscout_lines'); if(s) data=JSON.parse(s);}catch(e){}
+  lo.width=RW*ZOOM; lo.height=RW*ZOOM; setV();});
+function setV(){ VIEWS.forEach(v=>document.getElementById('v_'+v).classList.toggle('on',v===VIEW));
+  img=imgs[VIEW]; if(img){cv.width=img.width; cv.height=img.height;} draw(); }
+function pos(e,c){const r=c.getBoundingClientRect();
+  return {x:(e.clientX-r.left)*c.width/r.width, y:(e.clientY-r.top)*c.height/r.height};}
+cv.onclick=e=>{refine=pos(e,cv);
+  document.getElementById('loupewrap').style.display='block'; drawLoupe();};
+function drawLoupe(){ lox.fillStyle='#000'; lox.fillRect(0,0,lo.width,lo.height);
+  lox.imageSmoothingEnabled=false;
+  lox.drawImage(img,refine.x-RW/2,refine.y-RW/2,RW,RW,0,0,lo.width,lo.height);
+  lox.strokeStyle='rgba(124,196,255,.9)'; const c0=lo.width/2;
+  lox.beginPath(); lox.moveTo(c0,0); lox.lineTo(c0,lo.height);
+  lox.moveTo(0,c0); lox.lineTo(lo.width,c0); lox.stroke(); }
+function commit(lx,ly){ cur.push([+(refine.x-RW/2+lx).toFixed(2),+(refine.y-RW/2+ly).toFixed(2)]);
+  refine=null; document.getElementById('loupewrap').style.display='none'; draw(); }
+lo.onclick=e=>{const p=pos(e,lo); commit(p.x/ZOOM,p.y/ZOOM);};
+document.getElementById('lok').onclick=()=>commit(RW/2,RW/2);
+document.getElementById('lx').onclick=()=>{refine=null;
+  document.getElementById('loupewrap').style.display='none'; draw();};
+function finish(){ if(cur.length<3){msg('a line needs at least 3 points');return;}
+  data[VIEW].push({dir:dir, pts:cur}); cur=[]; persist(); draw(); }
+document.getElementById('finish').onclick=finish;
+document.getElementById('undo').onclick=()=>{cur.pop(); draw();};
+document.getElementById('save').onclick=()=>fetch('/lines',{method:'POST',
+  body:JSON.stringify(data)}).then(r=>r.text()).then(t=>msg(t)).catch(()=>msg('save failed'));
+document.getElementById('fitog').onclick=()=>{showFit=!showFit;
+  document.getElementById('fitog').classList.toggle('on',showFit);
+  document.getElementById('fitog').textContent=showFit?'show fit (F)':'fit hidden (F)'; draw();};
+addEventListener('keydown',e=>{
+  if(e.key==='f'||e.key==='F'){document.getElementById('fitog').onclick();e.preventDefault();return;}
+  if(e.key==='Enter'){finish();e.preventDefault();}
+  if(e.key==='Escape'){cur=[];refine=null;document.getElementById('loupewrap').style.display='none';draw();} });
+function msg(t){document.getElementById('msg').textContent=t;
+  setTimeout(()=>document.getElementById('msg').textContent='',2500);}
+function persist(){try{localStorage.setItem('autoscout_lines',JSON.stringify(data))}catch(e){}}
+
+let showFit=true, FIT=null;
+// --- straightness: how well do the marked points lie on a line, before/after
+//     removing a candidate distortion?  Minimising this over k1 IS the estimate.
+// The distortion here turned out to be PINCUSHION (k1 > 0), so the search must
+// span both signs -- a negative-only sweep reports "no distortion" and is wrong.
+function undist(p,k1,k2,cx0,cy0,f){ const x=(p[0]-cx0)/f, y=(p[1]-cy0)/f;
+  const r2=x*x+y*y, s=1+k1*r2+k2*r2*r2; return [cx0+x*s*f, cy0+y*s*f]; }
+// Inverse of undist: given a point that is straight in corrected space, where
+// does it actually appear in the image?  This is the direction worth drawing --
+// a straight world line pushed forward should trace the curve you can SEE.
+function redist(q,k1,k2,cx0,cy0,f){
+  // Solve r*(1+k1 r^2+k2 r^4) = R for r by BISECTION on the radius.  The naive
+  // fixed point x = X/s(x) diverges at large radius, which drew a grid that
+  // folded back on itself -- a rendering artefact, not the lens model.
+  const X=(q[0]-cx0)/f, Y=(q[1]-cy0)/f, R=Math.hypot(X,Y);
+  if(R<1e-12) return [cx0,cy0];
+  const g=r=>r*(1+k1*r*r+k2*r*r*r*r);
+  let lo=0, hi=Math.max(R,1e-3);
+  for(let i=0;i<80 && g(hi)<R;i++) hi*=1.5;
+  if(g(hi)<R) return [NaN,NaN];              // outside what this lens can image
+  for(let i=0;i<60;i++){ const mid=0.5*(lo+hi); if(g(mid)<R) lo=mid; else hi=mid; }
+  const r=0.5*(lo+hi), sc=r/R;
+  return [cx0+X*sc*f, cy0+Y*sc*f]; }
+function lineResid(pts){ const n=pts.length;
+  const mx=pts.reduce((a,p)=>a+p[0],0)/n, my=pts.reduce((a,p)=>a+p[1],0)/n;
+  let sxx=0,sxy=0,syy=0;
+  for(const p of pts){const dx=p[0]-mx,dy=p[1]-my; sxx+=dx*dx; sxy+=dx*dy; syy+=dy*dy;}
+  const t=0.5*Math.atan2(2*sxy,sxx-syy), a=-Math.sin(t), b=Math.cos(t);
+  let s=0; for(const p of pts){const d=a*(p[0]-mx)+b*(p[1]-my); s+=d*d;}
+  return Math.sqrt(s/n); }
+function totalResid(P,f){ let s=0,n=0;
+  for(const L of data[VIEW]){ if(L.pts.length<3) continue;
+    s+=lineResid(L.pts.map(p=>undist(p,P[0],P[1],P[2],P[3],f)))**2; n++; }
+  return n?Math.sqrt(s/n):null; }
+function fitLens(){
+  const f=675.0, W=cv.width, H=cv.height;
+  if(data[VIEW].filter(L=>L.pts.length>=3).length<2) return null;
+  let best=[0,0,W/2,H/2], bv=totalResid(best,f);
+  // coarse sweep over BOTH signs, then coordinate descent on all four
+  for(let k1=-0.6;k1<=0.9;k1+=0.05) for(let k2=-0.4;k2<=0.7;k2+=0.1){
+    const v=totalResid([k1,k2,W/2,H/2],f);
+    if(v!==null&&v<bv){bv=v;best=[k1,k2,W/2,H/2];} }
+  let step=[0.08,0.12,40,25];
+  for(let it=0;it<220;it++){ let imp=false;
+    for(let i=0;i<4;i++) for(const d of [1,-1]){
+      const t=best.slice(); t[i]+=d*step[i];
+      if(i>=2 && (t[i]<0.1*(i===2?W:H) || t[i]>0.9*(i===2?W:H))) continue;
+      if(i<2 && Math.abs(t[i])>1.2) continue;
+      const v=totalResid(t,f);
+      if(v!==null&&v<bv-1e-9){bv=v;best=t;imp=true;}
+    }
+    if(!imp) step=step.map(x=>x*0.65);
+    if(step[0]<1e-4) break;
+  }
+  return {k1:best[0],k2:best[1],cx:best[2],cy:best[3],f:f,rms:bv,
+          raw:totalResid([0,0,W/2,H/2],f)};
+}
+function draw(){
+  if(!img) return;
+  cx.drawImage(img,0,0);
+  const all=data[VIEW].concat(cur.length?[{dir:dir,pts:cur,live:true}]:[]);
+  const COL={X:'#6ee7a0',Y:'#7cc4ff',V:'#ffb454','?':'#c0c0c0'};
+  all.forEach((L,i)=>{ const c=COL[L.dir]||'#fff';
+    cx.strokeStyle=c; cx.lineWidth=L.live?2:3; cx.globalAlpha=L.live?0.9:0.75;
+    cx.beginPath(); L.pts.forEach((p,j)=>j?cx.lineTo(p[0],p[1]):cx.moveTo(p[0],p[1])); cx.stroke();
+    cx.globalAlpha=1; cx.fillStyle=c;
+    L.pts.forEach(p=>{cx.beginPath(); cx.arc(p[0],p[1],4,0,7); cx.fill();});
+    if(!L.live){ cx.font='bold 18px monospace';
+      cx.fillText(L.dir+(i+1),L.pts[0][0]+8,L.pts[0][1]-8); } });
+  FIT=fitLens();
+  if(showFit&&FIT){
+    // draw each marked line's points AFTER correction, plus the straight line
+    // they should lie on -- the gap between the two IS the residual
+    for(const L of data[VIEW]){ if(L.pts.length<3) continue;
+      const Q=L.pts.map(p=>undist(p,FIT.k1,FIT.k2,FIT.cx,FIT.cy,FIT.f));
+      cx.strokeStyle='rgba(255,255,255,.85)'; cx.lineWidth=1;
+      cx.beginPath(); Q.forEach((q,j)=>j?cx.lineTo(q[0],q[1]):cx.moveTo(q[0],q[1])); cx.stroke();
+      Q.forEach((q,j)=>{ cx.strokeStyle='rgba(255,255,255,.5)';
+        cx.beginPath(); cx.moveTo(L.pts[j][0],L.pts[j][1]); cx.lineTo(q[0],q[1]); cx.stroke(); });
+    }
+    // Straight lines in corrected space, pushed FORWARD into the image.  If the
+    // model is right these should lie along genuinely straight features in the
+    // photo, curving exactly as those features do.
+    cx.strokeStyle='rgba(255,120,255,.6)'; cx.lineWidth=1.5;
+    const M=1.6;                       // extend beyond the frame: correction pulls in
+    for(let i=0;i<=12;i++){ const gx=cv.width*(-(M-1)/2 + i/12*M);
+      cx.beginPath(); let on=false;
+      for(let j=0;j<=60;j++){ const gy=cv.height*(-(M-1)/2 + j/60*M);
+        const q=redist([gx,gy],FIT.k1,FIT.k2,FIT.cx,FIT.cy,FIT.f);
+        if(!isFinite(q[0])||!isFinite(q[1])){on=false;continue;}
+        on?cx.lineTo(q[0],q[1]):(cx.moveTo(q[0],q[1]),on=true); } cx.stroke(); }
+    for(let j=0;j<=8;j++){ const gy=cv.height*(-(M-1)/2 + j/8*M);
+      cx.beginPath(); let on=false;
+      for(let i=0;i<=90;i++){ const gx=cv.width*(-(M-1)/2 + i/90*M);
+        const q=redist([gx,gy],FIT.k1,FIT.k2,FIT.cx,FIT.cy,FIT.f);
+        if(!isFinite(q[0])||!isFinite(q[1])){on=false;continue;}
+        on?cx.lineTo(q[0],q[1]):(cx.moveTo(q[0],q[1]),on=true); } cx.stroke(); }
+    cx.fillStyle='#ff78ff'; cx.beginPath(); cx.arc(FIT.cx,FIT.cy,6,0,7); cx.fill();
+    cx.strokeStyle='rgba(255,120,255,.9)'; cx.lineWidth=1;
+    cx.beginPath(); cx.arc(FIT.cx,FIT.cy,11,0,7); cx.stroke();
+  }
+  let s=`${VIEW}: ${data[VIEW].length} lines marked`;
+  if(cur.length) s+=`   (marking a ${dir} line, ${cur.length} points — Enter to finish)`;
+  const byd={}; data[VIEW].forEach(L=>byd[L.dir]=(byd[L.dir]||0)+1);
+  s+=`\n  by direction: `+DIRS.map(([,d])=>`${d} ${byd[d]||0}`).join('   ');
+  if(FIT){
+    s+=`\n  uncorrected straightness ${FIT.raw.toFixed(2)} px  ->  corrected ${FIT.rms.toFixed(2)} px`
+      +`   (${(FIT.raw/Math.max(FIT.rms,1e-6)).toFixed(1)}x better)`;
+    s+=`\n  k1 ${FIT.k1>=0?'+':''}${FIT.k1.toFixed(3)}   k2 ${FIT.k2>=0?'+':''}${FIT.k2.toFixed(3)}`
+      +`   principal (${FIT.cx.toFixed(0)}, ${FIT.cy.toFixed(0)})   [at f=${FIT.f}]`;
+    s+= FIT.k1>0 ? '   pincushion' : (FIT.k1<0 ? '   barrel' : '');
+    s+= FIT.rms<FIT.raw*0.5 ? '   — distortion clearly measured'
+                            : '   — add longer lines reaching the corners';
+  }
+  s+=`\n\nMark edges you KNOW are straight: guardrail, wall/ceiling joins, banner edges,\nfield perimeter. Long lines through the corners carry the most information.`;
+  document.getElementById('stat').textContent=s;
+  document.getElementById('lines').innerHTML=data[VIEW].map((L,i)=>
+    `<div class="lrow">${L.dir}${i+1}: ${L.pts.length} pts, residual ${lineResid(L.pts).toFixed(2)} px`
+    +` <button onclick="del(${i})">delete</button></div>`).join('');
+}
+function del(i){ data[VIEW].splice(i,1); persist(); draw(); }
+</script>

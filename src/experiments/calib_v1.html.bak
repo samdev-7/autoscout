@@ -1,0 +1,355 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>autoscout — hybrid calibration</title>
+<style>
+  *{box-sizing:border-box}
+  body{background:#14161a;color:#e6e8eb;font:13px/1.45 -apple-system,system-ui,sans-serif;
+       margin:0;padding:12px 14px;max-width:1440px}
+  h2{font-size:14px;margin:16px 0 6px;font-weight:600;color:#9fb4d0}
+  .hint{color:#7d8899;font-weight:400;font-size:12px}
+  .box{border:1px solid #2b313a;border-radius:6px;background:#0d0f12;overflow:hidden}
+  canvas{display:block;width:100%;height:auto;cursor:crosshair}
+  #bar,#tagbtns{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:10px 0}
+  button{background:#232a35;color:#e6e8eb;border:1px solid #39424f;border-radius:5px;
+         padding:5px 10px;font-size:12px;cursor:pointer}
+  button:hover{background:#2e3846}
+  button.p{background:#1d3a5c;border-color:#2f5f96}
+  button.go{background:#1c4a32;border-color:#2f7d51}
+  button.tg{min-width:52px;font-family:ui-monospace,monospace}
+  button.tg.done{background:#1c4a32;border-color:#48c98a;color:#9df0c4}
+  button.tg.det{background:#4a3f10;border-color:#ffd400;color:#ffd400}
+  #stat,#tedinfo{font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap;
+        background:#0d0f12;border:1px solid #2b313a;border-radius:6px;padding:9px 11px;
+        margin-top:10px;color:#b9c6d6}
+  table{border-collapse:collapse;font-family:ui-monospace,Menlo,monospace;font-size:11px;margin-top:8px}
+  td,th{border:1px solid #2b313a;padding:2px 7px;text-align:right}
+  th{background:#1b212a;color:#9fb4d0}
+  #refwrap,#tedwrap{display:none;margin-top:8px;border:2px solid #ff9f1a;border-radius:6px;
+           background:#0d0f12;overflow:hidden}
+  #tedwrap{border-color:#48c98a}
+  #refhdr,#tedhdr{background:#2a2016;color:#ffb454;padding:5px 9px;font-size:12px;
+          display:flex;justify-content:space-between;align-items:center}
+  #tedhdr{background:#12301f;color:#9df0c4}
+  #ted{cursor:grab}
+  .step{display:inline-block;background:#1d3a5c;color:#cfe3fb;border-radius:3px;
+        padding:1px 7px;margin-right:6px;font-size:11px}
+</style>
+
+<div id="stat">loading…</div>
+
+<h2><span class="step">step 1</span>broadcast plate
+  <span class="hint">click near a carpet-level landmark — yellow = detected tags, held out</span></h2>
+<div class="box"><canvas id="cv"></canvas></div>
+
+<h2><span class="step">step 2</span>field diagram
+  <span class="hint">rotated 180° to match the camera view</span></h2>
+<div id="bar">
+  <button class="p" data-fx="0"      data-fy="0">corner X0 Y0</button>
+  <button class="p" data-fx="16.541" data-fy="0">corner Xmax Y0</button>
+  <button class="p" data-fx="16.541" data-fy="8.069">corner Xmax Ymax</button>
+  <button class="p" data-fx="0"      data-fy="8.069">corner X0 Ymax</button>
+  <button class="p" data-fx="8.2705" data-fy="4.0345">field centre</button>
+  <button id="undo">undo</button><button id="clear">clear</button><button id="copy">copy JSON</button>
+</div>
+<div class="box"><canvas id="cf"></canvas></div>
+
+<div id="refwrap">
+  <div id="refhdr"><span id="reflab">refine</span>
+    <span><button id="refok" class="go">use centre</button><button id="refx">cancel</button></span></div>
+  <canvas id="cr"></canvas>
+</div>
+
+<h2><span class="step">step 3</span>tag corners
+  <span class="hint">pick a tag, drag the 4 handles onto its corners — adds the Y/Z spread carpet points lack</span></h2>
+<div id="tagbtns"></div>
+<div id="tedwrap">
+  <div id="tedhdr"><span id="tedlab">tag</span>
+    <span><button id="tedsave" class="go">save</button><button id="tedrm">clear</button>
+          <button id="tedx">close</button></span></div>
+  <canvas id="ted"></canvas>
+</div>
+<div id="tedinfo">no tag open</div>
+
+<div id="tbl"></div>
+
+<script>
+const LEN=16.541, WID=8.069, FBW=1848, FBH=898;
+const DETECTED=[2,11,21];
+const RW=140, ZOOM=6;
+const TR=100, TZ=7;
+let pairs=[], pend=null, refine=null, TAGSALL=[], GUIDES=[], fboxR=null;
+let tagMarks={}, ted=null, sel=0, drag=null, peek=false;
+const d2fX=dx=>LEN*(1-dx/FBW), d2fY=dy=>WID*(dy/FBH);
+const f2dX=X=>FBW*(1-X/LEN),   f2dY=Y=>FBH*(Y/WID);
+
+const cv=document.getElementById('cv'), cx=cv.getContext('2d');
+const cf=document.getElementById('cf'), cfx=cf.getContext('2d');
+const cr=document.getElementById('cr'), crx=cr.getContext('2d');
+const te=document.getElementById('ted'), tex=te.getContext('2d');
+const plate=new Image(), fbox=new Image();
+let ready=0;
+plate.onload=fbox.onload=()=>{ if(++ready===2) boot(); };
+plate.src='out/top_plate.png'; fbox.src='out/field_box.png';
+
+async function boot(){
+  try{ TAGSALL=await (await fetch('out/tags.json')).json(); }catch(e){console.warn(e);}
+  try{ GUIDES =await (await fetch('out/tag_guides.json')).json(); }catch(e){console.warn(e);}
+  try{ const pre=await (await fetch('out/points_corrected.json')).json();
+       if(Array.isArray(pre)) pairs=pre; }catch(e){console.warn(e);}
+  try{ const tm=await (await fetch('out/tag_marks.json')).json();
+       if(tm&&typeof tm==='object') tagMarks=tm; }catch(e){}
+  fboxR=document.createElement('canvas'); fboxR.width=FBW; fboxR.height=FBH;
+  const g=fboxR.getContext('2d'); g.translate(FBW,FBH); g.rotate(Math.PI); g.drawImage(fbox,0,0);
+  init();
+}
+function pos(e,c){const r=c.getBoundingClientRect();
+  return {x:(e.clientX-r.left)*c.width/r.width, y:(e.clientY-r.top)*c.height/r.height};}
+
+function init(){
+  cv.width=plate.width; cv.height=plate.height; cf.width=FBW; cf.height=FBH;
+  cr.width=RW*ZOOM; cr.height=RW*ZOOM; te.width=TR*TZ; te.height=TR*TZ;
+  cv.onclick=e=>openRefine('plate',pos(e,cv));
+  cf.onclick=e=>openRefine('field',pos(e,cf));
+  cr.onclick=e=>{const p=pos(e,cr); commitRefine(p.x/ZOOM,p.y/ZOOM);};
+  document.getElementById('refok').onclick=()=>commitRefine(RW/2,RW/2);
+  document.getElementById('refx').onclick=()=>{refine=null;hide('refwrap');draw();};
+  document.querySelectorAll('button.p').forEach(b=>b.onclick=()=>addField(+b.dataset.fx,+b.dataset.fy));
+  document.getElementById('undo').onclick=()=>{pairs.pop();draw();};
+  document.getElementById('clear').onclick=()=>{pairs=[];pend=null;draw();};
+  document.getElementById('copy').onclick=()=>navigator.clipboard.writeText(
+    JSON.stringify({pairs,tagMarks},null,1));
+  buildTagButtons();
+  te.onmousedown=tedDown; te.onmousemove=tedMove;
+  window.onmouseup=()=>{drag=null; te.style.cursor='grab';};
+  document.getElementById('tedsave').onclick=()=>{
+    if(ted){tagMarks[ted.id]=ted.c.map(p=>[+p[0].toFixed(2),+p[1].toFixed(2)]);
+            buildTagButtons(); drawTed(); draw();}};
+  document.getElementById('tedrm').onclick=()=>{
+    if(ted){delete tagMarks[ted.id]; buildTagButtons(); drawTed(); draw();}};
+  document.getElementById('tedx').onclick=()=>{ted=null;hide('tedwrap');info();draw();};
+  window.addEventListener('keydown',tedKey);
+  window.addEventListener('keydown',e=>{if(e.code==='Space'&&ted&&!peek){e.preventDefault();peek=true;drawTed();}});
+  window.addEventListener('keyup',  e=>{if(e.code==='Space'&&ted){peek=false;drawTed();}});
+  draw();
+}
+const hide=id=>document.getElementById(id).style.display='none';
+const show=id=>document.getElementById(id).style.display='block';
+
+function openRefine(which,p){
+  refine={which,cx:p.x,cy:p.y};
+  const img=which==='plate'?plate:fboxR;
+  crx.imageSmoothingEnabled=false; crx.fillStyle='#000'; crx.fillRect(0,0,cr.width,cr.height);
+  crx.drawImage(img,p.x-RW/2,p.y-RW/2,RW,RW,0,0,cr.width,cr.height);
+  crx.strokeStyle='rgba(255,159,26,.85)'; crx.lineWidth=1; const c0=cr.width/2;
+  crx.beginPath();crx.moveTo(c0,c0-26);crx.lineTo(c0,c0+26);
+  crx.moveTo(c0-26,c0);crx.lineTo(c0+26,c0);crx.stroke();
+  document.getElementById('reflab').textContent='refine '+which+' — '+ZOOM+'x — click the exact point';
+  show('refwrap');
+  document.getElementById('refwrap').scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+function commitRefine(ox,oy){
+  if(!refine) return;
+  const nx=refine.cx-RW/2+ox, ny=refine.cy-RW/2+oy, w=refine.which;
+  refine=null; hide('refwrap');
+  if(w==='plate'){pend={x:nx,y:ny};draw();} else addField(d2fX(nx),d2fY(ny));
+}
+function addField(X,Y){
+  if(!pend){alert('Pick a point on the broadcast plate first (step 1).');return;}
+  pairs.push({u:+pend.x.toFixed(2),v:+pend.y.toFixed(2),X:+X.toFixed(4),Y:+Y.toFixed(4)});
+  pend=null; draw();
+}
+
+function buildTagButtons(){
+  const d=document.getElementById('tagbtns'); d.innerHTML='';
+  for(const g of GUIDES){
+    const b=document.createElement('button');
+    b.className='tg'+(tagMarks[g.id]?' done':(g.det?' det':''));
+    b.textContent=g.id+(tagMarks[g.id]?' ✓':'');
+    b.onclick=()=>openTed(g.id); d.appendChild(b);
+  }
+}
+function openTed(id){
+  const g=GUIDES.find(x=>x.id===id);
+  let c=tagMarks[id];
+  if(!c){ const s=7; c=[[g.gu-s,g.gv-s],[g.gu+s,g.gv-s],[g.gu+s,g.gv+s],[g.gu-s,g.gv+s]]; }
+  const mx=c.reduce((a,p)=>a+p[0],0)/4, my=c.reduce((a,p)=>a+p[1],0)/4;
+  ted={id:id,c:c.map(p=>[p[0],p[1]]),ox:mx-TR/2,oy:my-TR/2,Z:g.Z};
+  sel=0; show('tedwrap'); drawTed(); info();
+  document.getElementById('tedwrap').scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+const n2e=(nx,ny)=>[(nx-ted.ox)*TZ,(ny-ted.oy)*TZ];
+const e2n=(ex,ey)=>[ex/TZ+ted.ox, ey/TZ+ted.oy];
+function ring(p,R,G){                     // circle + 4 arms, centre left empty
+  tex.beginPath(); tex.arc(p[0],p[1],R,0,7); tex.stroke();
+  tex.beginPath();
+  tex.moveTo(p[0]-R,p[1]); tex.lineTo(p[0]-G,p[1]);
+  tex.moveTo(p[0]+G,p[1]); tex.lineTo(p[0]+R,p[1]);
+  tex.moveTo(p[0],p[1]-R); tex.lineTo(p[0],p[1]-G);
+  tex.moveTo(p[0],p[1]+G); tex.lineTo(p[0],p[1]+R);
+  tex.stroke();
+}
+function drawTed(){
+  if(!ted) return;
+  tex.imageSmoothingEnabled=false; tex.fillStyle='#000'; tex.fillRect(0,0,te.width,te.height);
+  tex.drawImage(plate,ted.ox,ted.oy,TR,TR,0,0,te.width,te.height);
+  if(peek){ document.getElementById('tedlab').textContent=
+      'tag '+ted.id+' — PEEK (release space to restore overlay)'; return; }
+  const P=ted.c.map(p=>n2e(p[0],p[1]));
+  tex.beginPath(); P.forEach((p,i)=>i?tex.lineTo(p[0],p[1]):tex.moveTo(p[0],p[1])); tex.closePath();
+  tex.fillStyle='rgba(72,201,138,.10)'; tex.fill();
+  tex.strokeStyle='rgba(72,201,138,.85)'; tex.lineWidth=2; tex.stroke();
+  P.forEach((p,i)=>{
+    const on=i===sel, R=on?15:12, G=6;      // G = clear radius: nothing is drawn inside it
+    tex.strokeStyle='rgba(0,0,0,.75)'; tex.lineWidth=4; ring(p,R,G);
+    tex.strokeStyle=on?'#ffd400':'#48c98a'; tex.lineWidth=2; ring(p,R,G);
+    tex.fillStyle=on?'#ffd400':'#48c98a'; tex.font='bold 12px monospace';
+    tex.fillText(i+1,p[0]+R+3,p[1]-R-1);
+  });
+  document.getElementById('tedlab').textContent=
+    'tag '+ted.id+' — '+TZ+'x — drag (grab off-centre), arrows 1px, shift 0.2px, SPACE peeks'
+    +(tagMarks[ted.id]?'  [saved]':'  [unsaved]');
+}
+function tedDown(e){
+  if(!ted) return;
+  const p=pos(e,te);
+  let best=-1,bd=1e9;
+  ted.c.forEach((q,i)=>{const E=n2e(q[0],q[1]);
+    const d=Math.hypot(E[0]-p.x,E[1]-p.y); if(d<bd){bd=d;best=i;}});
+  if(bd<26){ sel=best;
+    const E=n2e(ted.c[best][0],ted.c[best][1]);
+    drag={mode:'corner',i:best,dx:(E[0]-p.x)/TZ,dy:(E[1]-p.y)/TZ}; }
+  else { drag={mode:'move',last:e2n(p.x,p.y)}; te.style.cursor='grabbing'; }
+  drawTed();
+}
+function tedMove(e){
+  if(!ted||!drag) return;
+  const p=pos(e,te), n=e2n(p.x,p.y);
+  if(drag.mode==='corner'){ ted.c[drag.i]=[n[0]+drag.dx, n[1]+drag.dy]; }
+  else { const dx=n[0]-drag.last[0], dy=n[1]-drag.last[1];
+         ted.c=ted.c.map(q=>[q[0]+dx,q[1]+dy]); drag.last=n; }
+  drawTed(); info();
+}
+function tedKey(e){
+  if(!ted) return;
+  const k={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[e.key];
+  if(!k) return;
+  e.preventDefault();
+  const s=e.shiftKey?0.2:1;
+  ted.c[sel]=[ted.c[sel][0]+k[0]*s, ted.c[sel][1]+k[1]*s];
+  drawTed(); info();
+}
+function info(){
+  const el=document.getElementById('tedinfo');
+  if(!ted){ el.textContent='no tag open — '+Object.keys(tagMarks).length+' tag(s) marked'; return; }
+  const c=ted.c, side=(a,b)=>Math.hypot(c[a][0]-c[b][0],c[a][1]-c[b][1]);
+  const ctr=[c.reduce((a,p)=>a+p[0],0)/4, c.reduce((a,p)=>a+p[1],0)/4];
+  el.textContent=
+    'tag '+ted.id+'  Z='+(ted.Z/0.0254).toFixed(2)+' in above carpet\n'+
+    'centre ('+ctr[0].toFixed(2)+', '+ctr[1].toFixed(2)+')   sides '+
+    side(0,1).toFixed(1)+' '+side(1,2).toFixed(1)+' '+side(2,3).toFixed(1)+' '+side(3,0).toFixed(1)+' px\n'+
+    'marked so far: '+(Object.keys(tagMarks).sort((a,b)=>a-b).join(', ')||'none');
+}
+
+function solveH(ps){
+  if(ps.length<4) return null;
+  const sf=1/10, si=1/1000, n=ps.length, A=[], b=[];
+  for(const p of ps){ const X=p.X*sf,Y=p.Y*sf,u=p.u*si,v=p.v*si;
+    A.push([X,Y,1,0,0,0,-u*X,-u*Y]); b.push(u);
+    A.push([0,0,0,X,Y,1,-v*X,-v*Y]); b.push(v); }
+  const N=8,M=[];
+  for(let i=0;i<N;i++){ M.push(new Array(N+1).fill(0));
+    for(let j=0;j<N;j++) for(let k=0;k<2*n;k++) M[i][j]+=A[k][i]*A[k][j];
+    for(let k=0;k<2*n;k++) M[i][N]+=A[k][i]*b[k]; }
+  for(let i=0;i<N;i++){ let q=i;
+    for(let r=i+1;r<N;r++) if(Math.abs(M[r][i])>Math.abs(M[q][i])) q=r;
+    const t=M[i];M[i]=M[q];M[q]=t;
+    if(Math.abs(M[i][i])<1e-12) return null;
+    for(let r=0;r<N;r++){ if(r===i) continue; const f=M[r][i]/M[i][i];
+      for(let c2=i;c2<=N;c2++) M[r][c2]-=f*M[i][c2]; } }
+  const h=M.map((r,i)=>r[N]/M[i][i]);
+  const Hp=[[h[0],h[1],h[2]],[h[3],h[4],h[5]],[h[6],h[7],1]], H=[[0,0,0],[0,0,0],[0,0,0]];
+  for(let i=0;i<3;i++)for(let j=0;j<3;j++){
+    const rs=(i<2)?1/si:1, cs=(j<2)?sf:1; H[i][j]=Hp[i][j]*rs*cs; }
+  return H;
+}
+const proj=(H,X,Y)=>{const w=H[2][0]*X+H[2][1]*Y+H[2][2];
+  return [(H[0][0]*X+H[0][1]*Y+H[0][2])/w,(H[1][0]*X+H[1][1]*Y+H[1][2])/w];};
+
+function draw(){
+  cx.drawImage(plate,0,0); cfx.drawImage(fboxR,0,0);
+  for(const t of TAGSALL){
+    const fx=f2dX(t.X), fy=f2dY(t.Y), hot=DETECTED.indexOf(t.id)>=0, mk=!!tagMarks[t.id];
+    cfx.beginPath(); cfx.arc(fx,fy,(hot||mk)?14:8,0,7);
+    cfx.fillStyle=mk?'#48c98a':(hot?'#ffd400':'rgba(255,95,95,.9)'); cfx.fill();
+    if(hot||mk){cfx.strokeStyle='#1a1a1a';cfx.lineWidth=3;cfx.stroke();}
+    cfx.fillStyle=mk?'#9df0c4':(hot?'#ffd400':'#ff9a9a');
+    cfx.font='bold '+((hot||mk)?32:22)+'px monospace';
+    cfx.fillText(t.id,fx+((hot||mk)?18:11),fy-((hot||mk)?14:9));
+  }
+  const H=solveH(pairs);
+  if(H){
+    cx.strokeStyle='rgba(0,220,255,.65)'; cx.lineWidth=4;
+    for(let X=0;X<=LEN+1e-6;X+=1){cx.beginPath();
+      for(let t=0;t<=20;t++){const q=proj(H,Math.min(X,LEN),t/20*WID);t?cx.lineTo(q[0],q[1]):cx.moveTo(q[0],q[1]);}cx.stroke();}
+    for(let Y=0;Y<=WID+1e-6;Y+=1){cx.beginPath();
+      for(let t=0;t<=20;t++){const q=proj(H,t/20*LEN,Math.min(Y,WID));t?cx.lineTo(q[0],q[1]):cx.moveTo(q[0],q[1]);}cx.stroke();}
+    cx.strokeStyle='#ff3b6b'; cx.lineWidth=7; cx.beginPath();
+    [[0,0],[LEN,0],[LEN,WID],[0,WID],[0,0]].forEach(function(a,i){const q=proj(H,a[0],a[1]);i?cx.lineTo(q[0],q[1]):cx.moveTo(q[0],q[1]);});
+    cx.stroke();
+  }
+  for(const g of GUIDES){
+    if(tagMarks[g.id]){
+      const q=tagMarks[g.id];
+      cx.beginPath(); q.forEach((p,i)=>i?cx.lineTo(p[0],p[1]):cx.moveTo(p[0],p[1])); cx.closePath();
+      cx.fillStyle='rgba(72,201,138,.35)'; cx.fill();
+      cx.strokeStyle='#48c98a'; cx.lineWidth=3; cx.stroke();
+      cx.fillStyle='#48c98a'; cx.font='bold 26px monospace'; cx.fillText(g.id,q[0][0]+16,q[0][1]-10);
+    } else if(!g.det){
+      cx.strokeStyle='rgba(255,140,0,.85)'; cx.lineWidth=3;
+      cx.beginPath(); cx.arc(g.gu,g.gv,20,0,7); cx.stroke();
+      cx.fillStyle='rgba(255,170,60,.95)'; cx.font='bold 26px monospace';
+      cx.fillText(g.id,g.gu+22,g.gv-12);
+    }
+  }
+  for(const t of GUIDES.filter(g=>g.det)){
+    cx.strokeStyle='#ffd400'; cx.lineWidth=6; cx.beginPath();
+    cx.moveTo(t.gu-30,t.gv);cx.lineTo(t.gu+30,t.gv);
+    cx.moveTo(t.gu,t.gv-30);cx.lineTo(t.gu,t.gv+30); cx.stroke();
+  }
+  pairs.forEach((p,i)=>{mark(cx,p.u,p.v,'#39d98a',i+1); mark(cfx,f2dX(p.X),f2dY(p.Y),'#39d98a',i+1);});
+  if(pend) mark(cx,pend.x,pend.y,'#ff9f1a','?');
+  stats(H);
+}
+function mark(c,x,y,col,lab){
+  const k=c.canvas.width/620;
+  c.strokeStyle=col;c.lineWidth=2.2*k;c.beginPath();c.arc(x,y,6*k,0,7);c.stroke();
+  c.beginPath();c.moveTo(x-11*k,y);c.lineTo(x+11*k,y);c.moveTo(x,y-11*k);c.lineTo(x,y+11*k);c.stroke();
+  c.fillStyle=col;c.font='bold '+Math.round(13*k)+'px monospace';c.fillText(lab,x+12*k,y-6*k);
+}
+function stats(H){
+  const s=document.getElementById('stat');
+  const nt=Object.keys(tagMarks).length;
+  if(!H){ s.textContent='points '+pairs.length+' — need 4.   tags marked '+nt;
+          window.CALIB={pairs:pairs,tagMarks:tagMarks,H:null}; return; }
+  let se=0,mx=0,rows='';
+  for(const p of pairs){ const q=proj(H,p.X,p.Y), e=Math.hypot(q[0]-p.u,q[1]-p.v);
+    se+=e*e; mx=Math.max(mx,e);
+    rows+='<tr><td>'+p.u.toFixed(1)+'</td><td>'+p.v.toFixed(1)+'</td><td>'+p.X.toFixed(3)+
+          '</td><td>'+p.Y.toFixed(3)+'</td><td>'+e.toFixed(2)+'</td></tr>'; }
+  const rms=Math.sqrt(se/pairs.length);
+  const vx=H[0][0]/H[2][0];
+  // MUST use detector-measured positions (ou), never guide positions derived from H,
+  // or the check becomes circular and validates H against itself.
+  const T=GUIDES.filter(g=>g.det&&g.ou!==undefined).map(g=>({X:g.X,x:g.ou}));
+  let vt='n/a';
+  if(T.length===3){ const d=t=>(t.x-vx), A=T[0],B=T[1],C=T[2];
+    const pr=(A.X-C.X)/(A.X-B.X), me=(1/d(A)-1/d(C))/(1/d(A)-1/d(B));
+    vt='pred '+pr.toFixed(4)+' meas '+me.toFixed(4)+' err '+(100*Math.abs(me-pr)/Math.abs(pr)).toFixed(2)+'%'; }
+  s.textContent='points '+pairs.length+'   reproj RMS '+rms.toFixed(2)+' px   max '+mx.toFixed(2)+' px\n'+
+                'held-out AprilTag cross-ratio: '+vt+'\n'+
+                'tags marked: '+nt+'/9 new  (orange circles = where to look)';
+  document.getElementById('tbl').innerHTML=
+    '<table><tr><th>u</th><th>v</th><th>X m</th><th>Y m</th><th>err px</th></tr>'+rows+'</table>';
+  window.CALIB={pairs:pairs,tagMarks:tagMarks,H:H};
+}
+</script>

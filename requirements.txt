@@ -1,0 +1,11 @@
+av==18.1.0
+matplotlib==3.11.1
+networkx==3.6.1
+numpy==2.3.5
+opencv-python==5.0.0.93
+pillow==12.3.0
+roboflow==1.4.2
+scipy==1.18.1
+torch==2.14.0
+torchvision==0.29.0
+ultralytics==8.4.138

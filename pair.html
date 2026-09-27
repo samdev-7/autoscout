@@ -1,0 +1,195 @@
+<meta charset="utf-8">
+<title>autoscout — cross-view pairing</title>
+<style>
+:root{--bg:#14161a;--fg:#e8eaed;--dim:#9aa0a6;--line:#2a2e35;--acc:#7cc4ff;--ok:#6ee7a0}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 ui-sans-serif,system-ui,sans-serif}
+header{display:flex;gap:10px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line);
+       flex-wrap:wrap;position:sticky;top:0;background:var(--bg);z-index:5}
+button{background:#242830;color:var(--fg);border:1px solid var(--line);border-radius:4px;
+       padding:4px 10px;cursor:pointer;font:inherit}
+button.on{outline:2px solid var(--acc)}
+button.go{background:#1c4a32;border-color:#2f7d51}
+h2{font-size:12px;color:var(--dim);margin:10px 12px 4px;text-transform:uppercase;letter-spacing:.5px}
+.box{margin:0 12px;line-height:0;border:1px solid var(--line);overflow:hidden}
+canvas{display:block;width:100%;height:auto;cursor:crosshair}
+#stat{padding:6px 12px;color:var(--dim);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px}
+#scrub{width:100%;margin:0}
+#loupewrap{position:fixed;right:12px;bottom:12px;border:2px solid var(--acc);background:#000;display:none;z-index:9}
+#lohdr{background:#1d3a5c;color:#cfe3fb;padding:4px 8px;font-size:11px;display:flex;justify-content:space-between;gap:10px}
+table{border-collapse:collapse;font-family:ui-monospace,monospace;font-size:11px;margin:6px 12px 24px}
+td,th{border:1px solid var(--line);padding:2px 7px;text-align:right}
+th{color:var(--dim)}
+b.k{background:#242830;border-radius:3px;padding:1px 5px}
+</style>
+<header>
+  <span style="color:var(--dim)">station</span>
+  <button id="sv_red" class="on">red_station</button><button id="sv_redb">red_station (after cut)</button><button id="sv_blue">blue_station</button>
+  <span style="width:10px"></span>
+  <button id="prev">&larr;</button><span id="tlab" style="min-width:78px;text-align:center">t=—</span><button id="next">&rarr;</button>
+  <button id="undo">undo</button><button id="save" class="go">save</button>
+  <span id="msg" style="color:var(--acc)"></span>
+</header>
+<input id="scrub" type="range" min="0" max="0" value="0">
+<div id="stat">loading…</div>
+<h2 id="h1">1 · wide view (calibrated) — click where a robot meets the carpet</h2>
+<div class="box"><canvas id="cw"></canvas></div>
+<h2 id="h2s">2 · station view — click the SAME spot on the SAME robot</h2>
+<div class="box"><canvas id="cs"></canvas></div>
+<div id="loupewrap"><div id="lohdr"><span id="lolab">refine</span>
+  <span><button id="lok">use centre</button><button id="lx">cancel</button></span></div>
+  <canvas id="lo"></canvas></div>
+<div id="tbl"></div>
+<script>
+// The wide view is calibrated, so a click there IS a field coordinate: undistort,
+// cast the ray, intersect Z=0.  Pairing that with a click on the same robot in a
+// station view yields a ground correspondence at a known field position --
+// including places with no static landmark and no clickable carpet.
+const RW=130, ZOOM=3.5;
+let MAN=null, CAM=null, idx=0, station='red_station', pend=null, refine=null;
+let data={red_station:[],red_station_b:[],blue_station:[]}, imgs={};
+// The red_station panel CUTS to a different camera at t=103.33 s.  Pairs from
+// either side of that cut belong to different cameras and must not be mixed.
+const SEG={red_station:[7.25,103.33], red_station_b:[104.5,171.5],
+           blue_station:[7.25,172.0]};
+const cw=document.getElementById('cw'), wx=cw.getContext('2d');
+const cs=document.getElementById('cs'), sx=cs.getContext('2d');
+const lo=document.getElementById('lo'), lox=lo.getContext('2d');
+
+function undistort(x,y,k1){          // invert the radial model by fixed point
+  let ux=x, uy=y;
+  for(let i=0;i<12;i++){ const r2=ux*ux+uy*uy, s=1+k1*r2; ux=x/s; uy=y/s; }
+  return [ux,uy];
+}
+function imgToGround(u,v){
+  const {f,cx,cy,k1,R,C}=CAM;
+  const [nx,ny]=undistort((u-cx)/f,(v-cy)/f,k1);
+  // camera->world: world dir = R^T * ray
+  const d=[R[0][0]*nx+R[1][0]*ny+R[2][0], R[0][1]*nx+R[1][1]*ny+R[2][1], R[0][2]*nx+R[1][2]*ny+R[2][2]];
+  if(Math.abs(d[2])<1e-9) return null;
+  const s=-C[2]/d[2];
+  if(s<=0) return null;                       // behind the camera
+  return [C[0]+s*d[0], C[1]+s*d[1]];
+}
+Promise.all([fetch('out/pair_manifest.json').then(r=>r.json()),
+             fetch('out/wide_cam.json').then(r=>r.json())]).then(([m,c])=>{
+  MAN=m; CAM=c;
+  document.getElementById('scrub').max=MAN.frames.length-1;
+  lo.width=RW*ZOOM; lo.height=RW*ZOOM;
+  fetch('out/points_multi.json').then(r=>r.ok?r.json():null).then(j=>{
+    const KEYS=['red_station','red_station_b','blue_station'];
+    if(j) for(const k of KEYS) if(j[k]&&j[k].pairs) data[k]=j[k].pairs.slice();
+    try{const s=localStorage.getItem('autoscout_pair');
+        if(s){ const old=JSON.parse(s); for(const k of KEYS) if(old[k]) data[k]=old[k]; }
+    }catch(e){}
+    // A stored blob predating a new view would otherwise leave data[view]
+    // undefined, and every draw() throws before anything renders.
+    for(const k of KEYS) if(!Array.isArray(data[k])) data[k]=[];
+    go(0);
+  });
+});
+function frame(i){return MAN.frames[i]}
+function load(name,view){ const k=view+'/'+name;
+  if(!imgs[k]){ const im=new Image(); im.onload=draw; im.src='out/pair/'+view+'/'+name; imgs[k]=im; }
+  return imgs[k]; }
+function go(i){ idx=Math.max(0,Math.min(MAN.frames.length-1,i));
+  document.getElementById('scrub').value=idx; pend=null; refine=null; hideLoupe();
+  const f=frame(idx);
+  for(let k=idx;k<Math.min(idx+3,MAN.frames.length);k++){ load(frame(k).file,'wide'); load(frame(k).file,station); }
+  draw(); }
+function pos(e,c){const r=c.getBoundingClientRect();
+  return {x:(e.clientX-r.left)*c.width/r.width, y:(e.clientY-r.top)*c.height/r.height};}
+function hideLoupe(){document.getElementById('loupewrap').style.display='none';}
+function openLoupe(which,p){ refine={which,x:p.x,y:p.y};
+  document.getElementById('lolab').textContent='refine — '+(which==='wide'?'wide view':'station view');
+  document.getElementById('loupewrap').style.display='block'; drawLoupe(); }
+function drawLoupe(){ const f=frame(idx);
+  const src=refine.which==='wide'?load(f.file,'wide'):load(f.file,station);
+  lox.fillStyle='#000'; lox.fillRect(0,0,lo.width,lo.height); lox.imageSmoothingEnabled=false;
+  lox.drawImage(src,refine.x-RW/2,refine.y-RW/2,RW,RW,0,0,lo.width,lo.height);
+  lox.strokeStyle='rgba(124,196,255,.9)'; lox.lineWidth=1; const c0=lo.width/2;
+  lox.beginPath(); lox.moveTo(c0,0); lox.lineTo(c0,lo.height);
+  lox.moveTo(0,c0); lox.lineTo(lo.width,c0); lox.stroke(); }
+function commit(lx,ly){
+  const X=refine.x-RW/2+lx, Y=refine.y-RW/2+ly, w=refine.which; refine=null; hideLoupe();
+  if(w==='wide'){
+    const g=imgToGround(X,Y);
+    if(!g){ msg('that click does not hit the carpet'); draw(); return; }
+    pend={u:+X.toFixed(2), v:+Y.toFixed(2), X:+g[0].toFixed(3), Y:+g[1].toFixed(3)};
+  } else {
+    if(!pend){ msg('click the wide view first'); return; }
+    if(!inSeg(frame(idx).t)){ msg('outside this panel\'s usable segment — pair not recorded'); return; }
+    data[station].push({u:+X.toFixed(2), v:+Y.toFixed(2), X:pend.X, Y:pend.Y, t:frame(idx).t});
+    pend=null; persist();
+  }
+  draw();
+}
+function msg(t){ document.getElementById('msg').textContent=t;
+  setTimeout(()=>document.getElementById('msg').textContent='',2600); }
+function persist(){ try{localStorage.setItem('autoscout_pair',JSON.stringify(data))}catch(e){} }
+function mark(c,x,y,col,lab){ c.strokeStyle=col; c.lineWidth=2;
+  c.beginPath(); c.arc(x,y,8,0,7); c.stroke();
+  c.beginPath(); c.moveTo(x-15,y); c.lineTo(x-4,y); c.moveTo(x+4,y); c.lineTo(x+15,y);
+  c.moveTo(x,y-15); c.lineTo(x,y-4); c.moveTo(x,y+4); c.lineTo(x,y+15); c.stroke();
+  c.fillStyle=col; c.font='bold 15px monospace'; c.fillText(lab,x+11,y-9); }
+function inSeg(t){ const g=SEG[station]; return t>=g[0]&&t<=g[1]; }
+function draw(){
+  if(!MAN||!CAM) return;
+  const f=frame(idx), iw=load(f.file,'wide'), is=load(f.file,station);
+  if(iw.width){ cw.width=iw.width; cw.height=iw.height; wx.drawImage(iw,0,0); }
+  if(is.width){ cs.width=is.width; cs.height=is.height; sx.drawImage(is,0,0); }
+  document.getElementById('tlab').textContent='t='+f.t.toFixed(1)+'s';
+  if(pend) mark(wx,pend.u,pend.v,'#ff9f1a','?');
+  data[station].forEach((p,i)=>{ if(Math.abs(p.t-f.t)<0.01) mark(sx,p.u,p.v,'#6ee7a0',i+1); });
+  const n=data[station].length;
+  const Xs=data[station].map(p=>p.X), Ys=data[station].map(p=>p.Y);
+  let s=`${station}: ${n} paired points`;
+  if(n){ s+=`   field X ${Math.min(...Xs).toFixed(1)}..${Math.max(...Xs).toFixed(1)}`
+          + `   Y ${Math.min(...Ys).toFixed(1)}..${Math.max(...Ys).toFixed(1)} m`
+          + `  (of ${CAM.LEN.toFixed(1)} x ${CAM.WID.toFixed(1)})`; }
+  s+=`\nframe ${idx+1}/${MAN.frames.length}`;
+  s+=pend?`   PENDING field (${pend.X}, ${pend.Y}) — now click that robot in the station view`
+         :`   click a robot's carpet contact in the wide view first`;
+  if(!inSeg(f.t)){
+    s='\n!! t='+f.t.toFixed(1)+'s is OUTSIDE the usable segment for '+station
+      +' ('+SEG[station][0]+'..'+SEG[station][1]+'s).\n'
+      +'   This panel cuts to a DIFFERENT camera at 103.33 s — pairs from here would mix two cameras.'+s;
+    sx.save(); sx.fillStyle='rgba(255,60,60,.28)'; sx.fillRect(0,0,cs.width,cs.height);
+    sx.fillStyle='#fff'; sx.font='bold 34px system-ui';
+    sx.fillText('different camera after t=103.33s', 30, 60); sx.restore();
+  }
+  document.getElementById('stat').textContent=s;
+  let t='<table><tr><th>#</th><th>t</th><th>station u</th><th>v</th><th>field X</th><th>field Y</th></tr>';
+  data[station].forEach((p,i)=>{t+=`<tr><td>${i+1}</td><td>${p.t}</td><td>${p.u}</td><td>${p.v}</td><td>${p.X}</td><td>${p.Y}</td></tr>`});
+  document.getElementById('tbl').innerHTML=t+'</table>';
+}
+cw.onclick=e=>openLoupe('wide',pos(e,cw));
+cs.onclick=e=>openLoupe('station',pos(e,cs));
+lo.onclick=e=>{const p=pos(e,lo); commit(p.x/ZOOM,p.y/ZOOM);};
+document.getElementById('lok').onclick=()=>commit(RW/2,RW/2);
+document.getElementById('lx').onclick=()=>{refine=null;hideLoupe();draw();};
+document.getElementById('scrub').oninput=e=>go(+e.target.value);
+document.getElementById('prev').onclick=()=>go(idx-1);
+document.getElementById('next').onclick=()=>go(idx+1);
+document.getElementById('undo').onclick=()=>{data[station].pop();persist();draw();};
+for(const [id,v] of [['sv_red','red_station'],['sv_redb','red_station_b'],['sv_blue','blue_station']])
+  document.getElementById(id).onclick=()=>{ station=v;
+    document.getElementById('sv_red').classList.toggle('on',v==='red_station');
+    document.getElementById('sv_redb').classList.toggle('on',v==='red_station_b');
+    document.getElementById('sv_blue').classList.toggle('on',v==='blue_station');
+    document.getElementById('h2s').textContent='2 · '+v+' — click the SAME spot on the SAME robot';
+    go(idx); };
+document.getElementById('save').onclick=()=>{
+  // Save ONLY pairs made here (they carry a timestamp).  The landmark points
+  // loaded from points_multi.json are shown for context but stay owned by the
+  // other tool, so a save here can never duplicate or clobber them.
+  const own={}; for(const k in data) own[k]=data[k].filter(p=>p.t!==undefined);
+  fetch('/pairs',{method:'POST',body:JSON.stringify(own)})
+    .then(r=>r.text()).then(t=>msg(t)).catch(e=>msg('save failed'));
+};
+addEventListener('keydown',e=>{
+  if(e.key==='ArrowRight'){go(idx+(e.shiftKey?10:1));e.preventDefault();}
+  if(e.key==='ArrowLeft'){go(idx-(e.shiftKey?10:1));e.preventDefault();}
+  if(e.key==='Escape'){refine=null;pend=null;hideLoupe();draw();}
+});
+</script>
